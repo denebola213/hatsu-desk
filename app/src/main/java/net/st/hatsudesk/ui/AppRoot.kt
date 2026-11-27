@@ -3,8 +3,11 @@ package net.st.hatsudesk.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -36,41 +39,53 @@ fun HatsuDeskApp(repository: RunRepository) {
 
     BackHandler(enabled = stack.size > 1) { pop() }
 
-    // 端末の安全領域（ステータスバー・ジェスチャーバー・切り欠き）をここで一度だけ空ける。
-    // Android 15 以降は edge-to-edge が強制されるので、各画面に任せずルートで受ける。
+    // 端末のバーとキーボードは別々に空ける。同じノードで混ぜると役割が崩れる。
+    //
+    // 外側: ステータスバー・ナビゲーションバー・カットアウトだけを空ける。ヘッダーは
+    // ここに固定され、キーボードが出ても動かない。`safeDrawing` はこれに IME も含むので
+    // 使わない（含めると、キーボードが出た瞬間にヘッダーの基準まで一緒に動く）。
     Box(
         Modifier
             .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing),
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout)),
     ) {
-        when (val current = stack.last()) {
-            Screen.RunList -> RunListScreen(
-                repository = repository,
-                generation = listGeneration,
-                onOpenRun = { runId -> stack = stack + Screen.RunDetail(runId) },
-                onManualEntry = { stack = stack + Screen.ManualEntry },
-                onDictionary = { stack = stack + Screen.CardDictionary },
-            )
+        // 内側: IME の高さだけ本文を縮め、下端をキーボードの上に置く。
+        // 外側で systemBars を消費済みなので、ここで効くのは残りの IME 分だけ。
+        // Android 15 以降は edge-to-edge が強制されるので、各画面に任せずルートで受ける。
+        Box(
+            Modifier
+                .fillMaxSize()
+                .imePadding(),
+        ) {
+            when (val current = stack.last()) {
+                Screen.RunList -> RunListScreen(
+                    repository = repository,
+                    generation = listGeneration,
+                    onOpenRun = { runId -> stack = stack + Screen.RunDetail(runId) },
+                    onManualEntry = { stack = stack + Screen.ManualEntry },
+                    onDictionary = { stack = stack + Screen.CardDictionary },
+                )
 
-            is Screen.RunDetail -> RunDetailScreen(
-                repository = repository,
-                runId = current.runId,
-                onBack = pop,
-            )
+                is Screen.RunDetail -> RunDetailScreen(
+                    repository = repository,
+                    runId = current.runId,
+                    onBack = pop,
+                )
 
-            Screen.CardDictionary -> CardDictionaryScreen(
-                repository = repository,
-                onBack = pop,
-            )
+                Screen.CardDictionary -> CardDictionaryScreen(
+                    repository = repository,
+                    onBack = pop,
+                )
 
-            Screen.ManualEntry -> ManualEntryScreen(
-                repository = repository,
-                onBack = pop,
-                onSaved = {
-                    listGeneration += 1
-                    stack = listOf(Screen.RunList)
-                },
-            )
+                Screen.ManualEntry -> ManualEntryScreen(
+                    repository = repository,
+                    onBack = pop,
+                    onSaved = {
+                        listGeneration += 1
+                        stack = listOf(Screen.RunList)
+                    },
+                )
+            }
         }
     }
 }
