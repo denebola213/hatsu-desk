@@ -40,27 +40,39 @@ flowchart LR
   Q -->|Issue| L
 ```
 
-## 決定論的ゲート
+## ゲートは3層
 
-会話の指示ではなく、フックで機械的に止める。`harness/hooks/` にあり、`harness/install.sh` で `pre_tool_call` に取り付ける。
+| 層 | 守るもの | 実装 | 強さ |
+| --- | --- | --- | --- |
+| サーバー | main へ直接入れない・承認1件必須・force push 不可・管理者も迂回不可 | GitHub のブランチ保護 | 書き方を変えても通らない |
+| 認証 | エージェントが main を触れない | 管理者トークンを外し、GitHub App の installation token で動く | 権限が無いので不可能 |
+| ローカル | 事故の予防 | `hooks/*.py`（pre_tool_call）、`githooks/pre-push` | 書き方を変えれば通る |
 
-| ゲート | 止めるもの | 実装 |
-| --- | --- | --- |
-| main 直 push | `git push` の refspec に main/master | `git_guard.py` |
-| main 上での commit | 保護リポジトリで現在ブランチが main | `git_guard.py` |
-| force push | `--force` / `-f` | `git_guard.py` |
-| レビュー前マージ | `gh pr merge` で `reviewDecision != APPROVED`、または `--squash` 無し | `git_guard.py` |
-| 領域外タップ | `input tap` が `assets/regions.json` の外 | `adb_guard.py` |
-| 画面の自動操作 | `input text/keyevent`、`monkey`、`sendevent` | `adb_guard.py` |
-| 他パッケージの画面読取 | 前面が自パッケージでないときの `uiautomator dump` | `adb_guard.py` |
+**ローカルのフックは安全装置ではない。** コマンド文字列を見て判断する以上、`git -C`、変数展開、別経路で抜けられる。レビューで2回、実際に抜けられた。だから main の防衛はサーバーと認証に置き、フックは「うっかり main を触る」事故を減らすためだけに使う。名前も安全装置とは呼ばない。
 
-ゲートは文字列の部分一致ではなく、コマンドのトークン解析で判定する。`git -C`、`-c`、`sh -c`／`bash -lc`、引用符、refspec（`HEAD:main`）、`gh api` 経由のマージを塞いである。回帰は `python3 harness/tests/test_hooks.py` で固定する。ゲートを触ったら必ず通す。
+回帰テスト（`python3 harness/tests/test_hooks.py`、36本）は既知の書き方に対する回帰であって、健全性の証明ではない。
 
-adb の座標は数字リテラルしか受け付けない（`$X` などの変数展開は拒否）。`regions.json` が空のあいだは、すべてのタップが止まる。
+### サーバー側
 
-**ブランチ保護は private リポジトリ（無料枠）では使えない**（API が 403 を返す）。したがってサーバー側の強制は無く、このローカルフックが唯一の決定論的ゲートになる。フックを外すと規律だけが残る。
+public リポジトリでブランチ保護を有効にしてある（private の無料枠では API が 403 になる）。`enforce_admins=true`（管理者も迂回不可）、承認1件必須、linear history、force push と削除の禁止、会話の解決必須。
 
-`fail_closed: true` を付けているので、スクリプトが落ちた場合はツール呼び出しが通らず止まる。
+### 認証側
+
+エージェントは管理者トークンを持たない。`gh auth logout` 済みで、`harness/tools/gh` と `git-credential-app.sh` が App の installation token を都度発行する。App には Contents / Issues / Pull requests / Workflows の書き込みだけを与え、Administration は与えない。**main への ref 更新は 422 で拒否される**（実測）。
+
+トークン発行は PyJWT も cryptography も使わず、JWT の署名を openssl に任せる。
+
+### ローカル側
+
+| 止めるもの | 実装 |
+| --- | --- |
+| main 直 push・force push・main 上での commit | `githooks/pre-push`（git 自身が呼ぶ）と `hooks/git_guard.py` |
+| レビュー前マージ | `git_guard.py`（承認マーカーをコメントで確認） |
+| 領域外タップ | `adb_guard.py`（`assets/regions.json` の矩形のみ） |
+| 画面の自動操作 | `adb_guard.py`（`input text/keyevent`、`monkey`、`sendevent`） |
+| 他パッケージの画面読取 | `adb_guard.py`（前面が自パッケージのときだけ `uiautomator dump`） |
+
+`regions.json` が空のあいだは、すべてのタップが止まる。座標は数字リテラルしか受け付けない。
 
 ## 境界（ここは動かさない）
 

@@ -6,6 +6,7 @@ python3 harness/tests/test_hooks.py
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,7 @@ HOOKS = Path(__file__).resolve().parent.parent / "hooks"
 PKG = "net.st.hatsudesk"
 
 
-def run(hook, cmd, cwd, policy, env_extra=None):
+def run(hooks_dir, hook, cmd, cwd):
     payload = {
         "hook_event_name": "pre_tool_call",
         "tool_name": "terminal",
@@ -24,10 +25,10 @@ def run(hook, cmd, cwd, policy, env_extra=None):
         "session_id": "test",
         "profile": "default",
     }
-    env = dict(os.environ, HERMES_HOOK_POLICY=str(policy), **(env_extra or {}))
     p = subprocess.run(
-        [sys.executable, str(HOOKS / hook)],
-        input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=40,
+        [sys.executable, str(hooks_dir / hook)],
+        input=json.dumps(payload), capture_output=True, text=True,
+        env=dict(os.environ), timeout=40,
     )
     try:
         d = json.loads(p.stdout.strip() or "{}")
@@ -44,6 +45,21 @@ def run(hook, cmd, cwd, policy, env_extra=None):
 
 def setup():
     tmp = Path(tempfile.mkdtemp(prefix="hooktest-"))
+
+    # フックは policy.json を自分の隣から読む。テスト用の複製を作り、
+    # その隣にテスト用の policy.json を置く（本番コードに継ぎ目を作らない）。
+    hooks = tmp / "hooks"
+    hooks.mkdir()
+    for f in HOOKS.glob("*.py"):
+        shutil.copy2(f, hooks / f.name)
+
+    # 前面パッケージの判定を差し替えるため、adb の代役を policy で指す。
+    fake_adb = tmp / "adb"
+    fake_adb.write_text(
+        '#!/bin/sh\necho "topResumedActivity=ActivityRecord{1 u0 com.other.app/.Main t1}"\n'
+    )
+    fake_adb.chmod(0o755)
+
     repo = tmp / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -58,16 +74,16 @@ def setup():
         "version": 1,
         "regions": [{"name": "capture", "l": 0, "t": 0, "r": 100, "b": 100}],
     }))
-    policy = tmp / "policy.json"
+    policy = hooks / "policy.json"
     policy.write_text(json.dumps({
         "protected_repos": [str(repo)],
         "repos": ["denebola213/hatsu-desk"],
         "package": PKG,
         "review_marker": "<!-- agent-dev-org:review-approved -->",
         "tap_regions_source": str(regions),
-        "tools": {},
+        "tools": {"adb": str(fake_adb)},
     }, ensure_ascii=False))
-    return tmp, repo, policy
+    return tmp, repo, hooks
 
 
 CASES = [
@@ -112,13 +128,12 @@ CASES = [
 
 
 def main():
-    tmp, repo, policy = setup()
+    tmp, repo, hooks = setup()
     failures = 0
     print(f"{'hook':<12} {'expect':<7} {'got':<7} コマンド")
     for hook, cmd, expect, note in CASES:
         c = cmd.format(repo=repo)
-        extra = {"HERMES_HOOK_FAKE_FG": "com.other.app"} if "uiautomator" in c else {}
-        got, reason = run(hook, c, repo, policy, extra)
+        got, reason = run(hooks, hook, c, repo)
         okmark = "  " if got == expect else "× "
         if got != expect:
             failures += 1

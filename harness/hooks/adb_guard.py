@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """pre_tool_call: adb 経由の画面操作を、自アプリの宣言済み領域に限定する。
 
-文字列一致では引用符・変数展開で抜けられる。adb のサブコマンドをトークンに
-分解し、数値は「純粋な数字リテラル」だけを受け付ける（$X 等は拒否）。
+これも**ガードレール**であって安全装置ではない。ゲームを操作しないという
+境界は、据え置き端末にゲームを入れないことで構造的に守る。このフックは
+「アプリの外を押してしまう」事故を減らすためのもの。
 
 方針:
 - タップ・スワイプは regions.json に載っている矩形の中だけ許可する
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-POLICY_PATH = Path(os.environ.get("HERMES_HOOK_POLICY", HERE / "policy.json"))
+POLICY_PATH = HERE / "policy.json"
 INPUT_DENY = {"text", "keyevent", "press", "roll", "draganddrop", "motionevent", "tap"}
 
 
@@ -78,9 +79,6 @@ def as_int(tok):
 
 
 def foreground_package(policy):
-    fake = os.environ.get("HERMES_HOOK_FAKE_FG")
-    if fake is not None:
-        return fake
     adb = policy.get("tools", {}).get("adb") or shutil.which("adb") or "adb"
     try:
         out = subprocess.run(

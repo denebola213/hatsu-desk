@@ -84,6 +84,11 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 print("allowlist:", len(data["approvals"]), "entries")
 PY
 
+# 5) git の pre-push（リポジトリ内のフックを git 自身に呼ばせる）
+chmod +x "$HARNESS/githooks/pre-push"
+git -C "$REPO" config core.hooksPath "$HARNESS/githooks"
+echo "core.hooksPath=$(git -C "$REPO" config core.hooksPath)"
+
 echo "== verify =="
 HERMES_BIN="$(command -v hermes || echo /app/venv/bin/hermes)"
 "$HERMES_BIN" hooks list 2>&1 | tail -12

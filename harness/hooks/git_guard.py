@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """pre_tool_call: git / gh の操作をリポジトリ単位で制限する。
 
-文字列の部分一致では `git -C x push`、`"main"`、`sh -c "..."` で抜けられる。
-コマンドをトークンに分解し、git/gh のサブコマンドと引数を解釈して判定する。
+これは**ガードレール**であって安全装置ではない。main を守っているのは
+GitHub 側のブランチ保護（直 push 不可・承認必須・管理者を含む）。この
+フックは「うっかり main を触る」事故を手前で減らすためのもの。コマンド
+文字列を見て判断する以上、書き方を変えれば通る。
 
 方針:
 - 保護リポジトリの main への直接 push と main 上での commit を禁止する
@@ -23,7 +25,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-POLICY_PATH = Path(os.environ.get("HERMES_HOOK_POLICY", HERE / "policy.json"))
+POLICY_PATH = HERE / "policy.json"
 BRANCHES = ("main", "master")
 
 
