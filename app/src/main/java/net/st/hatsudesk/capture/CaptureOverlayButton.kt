@@ -29,11 +29,6 @@ import kotlin.math.roundToInt
  * ゲームの操作を壊さないための約束:
  * - `FLAG_NOT_FOCUSABLE` … キー入力もフォーカスも奪わない。ボタンの外のタッチはそのまま
  *   下のアプリへ抜ける（`FLAG_NOT_TOUCH_MODAL`）。ボタンの上だけは自分が受け取る
- * - **`FLAG_SECURE` … この窓をスクリーンショットと `MediaProjection` の出力から外す。**
- *   SurfaceFlinger は投影（`VirtualDisplay` の複製）を作るとき、セキュアな層を描かない。
- *   したがって保存した PNG にボタンは写らない。隠す・待つ・戻す手順そのものが要らなくなる
- *   （隠す時刻とフレームの時刻を比べる方式は、`Image.getTimestamp()` が合成時刻ではなく
- *   最終 sink への queueBuffer 時刻なので、原理的に焼き付きを排除できなかった）
  * - 見た目は円ひとつ。影もカードも無い。押している間だけ少し濃くする
  *
  * 位置は [OverlayPosition] が持ち、ドラッグで動き、離すと左右の近い端へ寄る。
@@ -104,7 +99,7 @@ class CaptureOverlayButton(
     /** 画面に載っているか。外せなかった場合は true のまま残る（＝参照を捨てなくてよい）。 */
     val isAttached: Boolean get() = attachment.isAttached
 
-    /** 一度でも位置を決めたか。出し直しても位置を忘れない。 */
+    /** 一度でも位置を決めたか。取得のたびに隠しても位置を忘れない。 */
     private var placed = false
 
     /** 画面の回転・解像度の変化に追従する。 */
@@ -136,7 +131,7 @@ class CaptureOverlayButton(
             ).clamped(sizePx, sizePx, next.width, next.height)
             placed = true
         } else {
-            // 出していない間に回転していたら、出す前に移し直す。
+            // 隠している間に回転していたら、出す前に移し直す。
             position = position.reflow(
                 oldScreenWidth = screen.width,
                 oldScreenHeight = screen.height,
@@ -151,7 +146,9 @@ class CaptureOverlayButton(
             sizePx,
             sizePx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WINDOW_FLAGS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -170,10 +167,11 @@ class CaptureOverlayButton(
     }
 
     /**
-     * 外す（停止時）。**外れたかを返す。** 外れていなければ呼出側は参照を捨てずに再試行する。
-     * 何度呼んでも安全。
+     * 隠す。**外れたかを返す。** 外れていなければ呼出側は保存を中止する
+     * （ボタンが写った1枚を残さない）。外せなかった場合は出たままの状態を保つので、
+     * もう一度呼べば外し直せる。何度呼んでも安全。
      */
-    fun detach(): Boolean = attachment.detach()
+    fun hide(): Boolean = attachment.detach()
 
     /** 実際に画面に載っているか。状態の取り違えで「外したつもり」にならないよう見る。 */
     private fun isOnScreen(): Boolean =
@@ -181,7 +179,7 @@ class CaptureOverlayButton(
 
     /**
      * 画面の大きさが変わった。ボタンが画面の外に残らないよう、位置を移し直す。
-     * 一度外して出し直す間も、位置だけは追従させる。
+     * 表示していない間（取得のため一瞬隠している間）も位置だけは追従させる。
      */
     fun onScreenChanged() {
         val next = currentScreen()
@@ -314,16 +312,6 @@ class CaptureOverlayButton(
 
     private companion object {
         const val LOG_TAG = "hatsudesk"
-
-        /**
-         * 窓の性質。`FLAG_SECURE` が、このボタンを投影の絵から外す本体。
-         * 触る前に [CaptureOverlayButton] の説明と、実機での画素確認の手順を読むこと。
-         * 外すと保存した PNG にボタンが写る（隠す・待つ処理はもう無い）。
-         */
-        val WINDOW_FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_SECURE
 
         /** 小さすぎると押しにくく、大きいとゲームの邪魔になる。 */
         const val SIZE_DP = 44f
