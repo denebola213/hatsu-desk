@@ -51,6 +51,8 @@ android {
 dependencies {
     implementation(project(":core"))
     implementation(libs.androidx.activity.compose)
+    // 画面に戻ったとき（ON_RESUME）に保存枚数を数え直すため
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)

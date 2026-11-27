@@ -122,19 +122,35 @@ object CaptureController {
         appContext = context.applicationContext
         if (countsLoaded) return
         countsLoaded = true
-        scope.launch {
-            val files = try {
-                withContext(Dispatchers.IO) { captureStore().list() }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.e(LOG_TAG, "保存済みの枚数を読めませんでした", error)
-                emptyList()
-            }
-            synchronized(this@CaptureController) {
-                savedCount = files.size
-                publish()
-            }
+        scope.launch { reloadSavedCount() }
+    }
+
+    /**
+     * 保存済みの枚数をディスクから数え直す。画面に戻ってきたとき（`ON_RESUME`）に呼ぶ。
+     *
+     * 起動時の一度きりだと、外部（adb・ファイルマネージャ）でファイルが消えたときに
+     * 「保存した枚数」が実際とずれる。数えるのは表示のためだけなので、失敗しても
+     * 前回の値のままにする。まだ [attach] されていなければ何もしない。
+     */
+    @Synchronized
+    fun refreshSavedCount() {
+        if (appContext == null) return
+        scope.launch { reloadSavedCount() }
+    }
+
+    /** 実際のファイル数で [savedCount] を置き換える。読めなければ何もしない。 */
+    private suspend fun reloadSavedCount() {
+        val files = try {
+            withContext(Dispatchers.IO) { captureStore().list() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.e(LOG_TAG, "保存済みの枚数を読めませんでした", error)
+            return
+        }
+        synchronized(this) {
+            savedCount = files.size
+            publish()
         }
     }
 

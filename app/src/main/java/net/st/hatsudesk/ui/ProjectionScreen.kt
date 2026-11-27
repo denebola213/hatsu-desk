@@ -28,9 +28,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import net.st.hatsudesk.capture.CaptureController
 import net.st.hatsudesk.capture.CaptureService
 import net.st.hatsudesk.capture.ProjectionSession
+
+/** 通知が許可されていないときに、開始前に画面へ出す説明（理由と影響）。 */
+private const val NOTIFICATION_DENIED_NOTICE =
+    "通知が許可されていないため、投影中も通知は表示されません。" +
+        "停止はこの画面の「投影を停止」から行えます。"
 
 /**
  * M1-a の暫定画面。設計 §4.1 の「常時バッファ＋取得ボタン」のうち、オーバーレイではなく
@@ -72,9 +78,11 @@ fun ProjectionScreen(onBack: () -> Unit) {
 
     // 通知は「あれば使う」だけ。Android 13 以降で拒否されると前面サービスの通知は
     // ドロワーに出ないが、停止はこの画面の「投影を停止」で行えるので、拒否されても
-    // そのまま同意へ進む（投影を止められない状態を作らない）。
-    val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        // 許可・拒否のどちらでも開始を続ける。結果は通知が出るかどうかにしか影響しない。
+    // そのまま同意へ進む（投影を止められない状態を作らない）。理由と影響は開始前に見せる。
+    var notificationDenied by remember { mutableStateOf(!notificationPermissionGranted(context)) }
+
+    val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        notificationDenied = !granted
         if (waitingForNotification) {
             waitingForNotification = false
             launchConsent()
@@ -82,6 +90,14 @@ fun ProjectionScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) { CaptureController.attach(context) }
+
+    // 画面に戻ってきたとき（ON_RESUME）に読み直す。起動時の一度きりだと、外部で
+    // ファイルが消えたときに「保存した枚数」がずれ、通知を後から許可しても説明が残る。
+    LifecycleResumeEffect(context) {
+        CaptureController.refreshSavedCount()
+        notificationDenied = !notificationPermissionGranted(context)
+        onPauseOrDispose {}
+    }
 
     ScreenFrame(title = "投影", onBack = onBack) {
         Column(
@@ -99,11 +115,16 @@ fun ProjectionScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium)
             }
+            if (notificationDenied) {
+                Spacer(Modifier.height(8.dp))
+                Text(NOTIFICATION_DENIED_NOTICE, style = MaterialTheme.typography.bodyMedium)
+            }
 
             SectionTitle("操作")
             Button(
                 onClick = {
                     if (notificationPermissionGranted(context)) {
+                        notificationDenied = false
                         launchConsent()
                     } else {
                         waitingForNotification = true
@@ -114,12 +135,16 @@ fun ProjectionScreen(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("投影を開始") }
 
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = { CaptureController.stop("投影を停止しました") },
-                enabled = state.canStop,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("投影を停止") }
+            // 通知の「停止」が出ない環境でも止められるよう、投影中は常にこの画面に出す。
+            // 通知の「停止」と同じ CaptureController.stop() を通るので、両方押されても
+            // 二重に解放しない（停止済みなら何もしない）。
+            if (state.canStop) {
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { CaptureController.stop("投影を停止しました") },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("投影を停止") }
+            }
 
             Spacer(Modifier.height(8.dp))
             Button(
