@@ -4,7 +4,7 @@ local.properties
 .idea/
 .DS_Store
 
-# Gradle の出力。`build/` と書くと build/Containerfile まで除外されるのでルート限定にする
+# Gradle の出力。`build/` と書くと任意の階層に一致するのでルート限定にする
 /build/
 /app/build/
 dist/

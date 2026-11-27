@@ -22,7 +22,7 @@ scripts/abuild.sh lint testDebugUnitTest
 イメージを作り直すとき:
 
 ```bash
-podman build --squash -t localhost/android-build:agp9.5-sdk36 build/
+podman build --squash -t localhost/android-build:agp9.5-sdk37 container/
 ```
 
 ### 固定している版

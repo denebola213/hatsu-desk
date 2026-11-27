@@ -1,0 +1,68 @@
+# Android ビルド用コンテナ（Hermes のコンテナから SSH 越しに駆動する）
+#
+# 版はすべて固定する。AGP の既定 build-tools を当てにすると、イメージに無い版を
+# ビルド時に SDK へ取りに行き、コンテナ再作成でそれが消える。
+#
+#   AGP 9.5.0  -> Gradle 9.6.0 / build-tools 36.0.0 / JDK 17 / KGP 2.2.10
+#   https://developer.android.com/build/releases/gradle-plugin
+
+FROM docker.io/library/debian:bookworm-slim
+
+ARG CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip
+ARG CMDLINE_TOOLS_SHA1=e025545c62a8e64c7559119566a569fb1dec5f60
+ARG GRADLE_VERSION=9.6.0
+ARG GRADLE_SHA256=bbaeb2fef8710818cf0e261201dab964c572f92b942812df0c3620d62a529a01
+ARG PLATFORM="platforms;android-36 platforms;android-37.0 platforms;android-37.2"
+ARG BUILD_TOOLS="build-tools;36.0.0 build-tools;37.0.0"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openjdk-17-jdk-headless ca-certificates curl unzip git rsync \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_USER_HOME=/root/.android \
+    GRADLE_USER_HOME=/gradle \
+    GRADLE_HOME=/opt/gradle \
+    PATH=/opt/gradle/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Gradle（wrapper を生成し、ネットワーク不通でもビルドを再現できるようにする）
+RUN mkdir -p /opt/gradle /gradle /work \
+ && curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+ && echo "${GRADLE_SHA256}  /tmp/gradle.zip" | sha256sum -c - \
+ && unzip -q /tmp/gradle.zip -d /opt \
+ && mv "/opt/gradle-${GRADLE_VERSION}" /opt/gradle-dist \
+ && rm -rf /tmp/gradle.zip \
+ && ln -s /opt/gradle-dist/bin/gradle /usr/local/bin/gradle
+
+# Android SDK command-line tools（SHA-1 で固定）
+RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
+ && curl -fsSL -o /tmp/tools.zip "$CMDLINE_TOOLS_URL" \
+ && echo "$CMDLINE_TOOLS_SHA1  /tmp/tools.zip" | sha1sum -c - \
+ && unzip -q /tmp/tools.zip -d /tmp/ct \
+ && mv /tmp/ct/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest" \
+ && rm -rf /tmp/tools.zip /tmp/ct
+
+# ログインシェル（bash -lc）でも見えるようにする。ENV PATH だけでは /etc/profile に上書きされる。
+RUN printf '%s\n' \
+      'export ANDROID_HOME=/opt/android-sdk' \
+      'export ANDROID_SDK_ROOT=/opt/android-sdk' \
+      'export GRADLE_USER_HOME=/gradle' \
+      'export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64' \
+      'export PATH=/opt/gradle/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' \
+      > /etc/profile.d/android.sh
+
+RUN yes | sdkmanager --licenses > /dev/null || true
+
+# build-tools は AGP 9.5 の既定値 36.0.0 を入れ、compileSdk 37 用に 37.0.0 も入れる。
+# $PLATFORM/$BUILD_TOOLS は意図的にクォートしない（空白区切りで複数指定するため）
+RUN sdkmanager --install $PLATFORM $BUILD_TOOLS platform-tools > /dev/null \
+ && rm -rf "$ANDROID_USER_HOME/cache" \
+ && sdkmanager --list_installed
+
+WORKDIR /work
+CMD ["sleep", "infinity"]
