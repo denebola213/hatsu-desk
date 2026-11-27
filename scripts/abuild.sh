@@ -21,3 +21,9 @@ podman run --rm \
   -w /work \
   "$IMAGE" \
   bash -lc "gradle --no-daemon --console=plain ${TASKS[*]}"
+
+# ビルドが通っても、通信権限が混入していれば成果物にしない（ADR 0010）。
+# ここが失敗すると set -e でスクリプト全体が失敗する。
+echo "== INTERNET 権限の検査 =="
+bash "$PROJ/scripts/check-no-internet.sh" --merged
+
