@@ -32,7 +32,7 @@ ln -sfn "$HARNESS/hooks/policy.json" "$HH/agent-hooks/policy.json"
 mkdir -p "$HH/skills/software-development"
 ln -sfn "$HARNESS/skills/agent-dev-org" "$HH/skills/software-development/agent-dev-org"
 
-# 3) hooks ブロック（既にあれば触らない）
+# 4) hooks ブロック（既にあれば触らない）
 if grep -q '^hooks:' "$HH/config.yaml"; then
   echo "config.yaml に hooks: があるため追記しない（手で確認する）"
 else
@@ -59,7 +59,7 @@ YAML
   echo "config.yaml に hooks を追記した"
 fi
 
-# 4) 同意（gateway は対話プロンプトを出さないので明示的に許可する）
+# 5) 同意（gateway は対話プロンプトを出さないので明示的に許可する）
 AL="$HH/shell-hooks-allowlist.json"
 python3 - "$AL" "$HH/agent-hooks" <<'PY'
 import json, sys
