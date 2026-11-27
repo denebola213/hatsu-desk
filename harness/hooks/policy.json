@@ -1,0 +1,22 @@
+{
+  "_comment": "git_guard / adb_guard が読む。protected_repos の外では何も制限しない。",
+  "protected_repos": [
+    "/workspace/apps/hatsu-desk",
+    "/home/hermeswebui/.hermes/home/dev/hatsu-desk"
+  ],
+  "package": "net.st.hatsudesk",
+  "review_marker": "<!-- agent-dev-org:review-approved -->",
+  "tools": {
+    "gh": "/home/hermeswebui/.hermes/home/.local/bin/gh",
+    "adb": "/home/hermeswebui/.hermes/home/opt/platform-tools/adb"
+  },
+  "tap_regions_source": "/workspace/apps/hatsu-desk/app/src/main/assets/regions.json",
+  "deny_shell": [
+    "monkey",
+    "sendevent",
+    "settings put",
+    "pm clear",
+    "pm uninstall",
+    "am force-stop"
+  ]
+}
