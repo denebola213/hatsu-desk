@@ -33,10 +33,28 @@ def gh_api(path: str):
         return None
 
 
+def gh_status(path: str) -> int:
+    """HTTP ステータスを返す。200 以外は本文を読まない。"""
+    out = subprocess.run([str(GH), "api", path], capture_output=True, text=True, timeout=60)
+    if out.returncode == 0:
+        return 200
+    for code in (403, 404, 401, 422):
+        if f"HTTP {code}" in out.stderr:
+            return code
+    return -1
+
+
 def check_protection() -> None:
+    status = gh_status(f"repos/{REPO}/branches/main/protection")
+    if status == 404:
+        problems.append("ブランチ保護が無い")
+        return
+    if status == 403:
+        notes.append("保護の状態は App 権限では読めない（Administration: read を付けると点検できる）")
+        return
     prot = gh_api(f"repos/{REPO}/branches/main/protection")
     if prot is None:
-        problems.append("ブランチ保護が取れない（未設定か権限不足）")
+        problems.append(f"ブランチ保護を取得できない（HTTP {status}）")
         return
     if not (prot.get("enforce_admins") or {}).get("enabled"):
         problems.append("enforce_admins が無効。管理者が迂回できる")
@@ -84,7 +102,10 @@ def check_outsiders() -> None:
     if prs is None:
         return
     for pr in prs:
+        user = pr.get("user") or {}
         assoc = pr.get("author_association")
+        if user.get("type") == "Bot" or str(user.get("login", "")).endswith("[bot]"):
+            continue
         if assoc not in ("OWNER", "MEMBER", "COLLABORATOR"):
             notes.append(f"外部からの PR が開いている: #{pr.get('number')} {pr.get('user', {}).get('login')}")
 
