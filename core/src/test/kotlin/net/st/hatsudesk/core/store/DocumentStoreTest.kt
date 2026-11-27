@@ -15,6 +15,7 @@ import net.st.hatsudesk.core.model.RunMemory
 import net.st.hatsudesk.core.model.RunSkill
 import net.st.hatsudesk.core.model.RunSupport
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
@@ -327,6 +328,53 @@ class DocumentStoreTest {
 
         assertEquals(card, store.loadCard("card-1"))
         assertEquals(listOf(card), store.loadCards())
+    }
+
+    @Test
+    fun `日本語を含むカード名が UTF-8 で往復する`() {
+        val root = newRoot()
+        val store = newStore(root)
+        val card = CardMaster(
+            cardId = "card-ja-1",
+            kind = "support",
+            name = "【白線のリズム】篠澤 広",
+            charId = "char-1",
+            rarity = "SSR",
+            lessonType = "vo",
+            probability = 37.5,
+            attr = "vo",
+            cost = 10,
+            condition = "レッスン3回・やる気↑",
+            source = "detail",
+            detailOk = true,
+        )
+
+        store.saveCard(card)
+
+        assertEquals(card, store.loadCard("card-ja-1"))
+        assertEquals(listOf(card), store.loadCards())
+
+        // 生のファイルが UTF-8 で、非 ASCII をそのまま持っていること。
+        // 文字化けや \uXXXX への退避があると、ここで気づける。
+        val text = String(Files.readAllBytes(root.resolve("cards/card-ja-1.json")), StandardCharsets.UTF_8)
+        assertTrue(text.contains("篠澤 広"), "日本語がそのまま書かれていない: $text")
+        assertTrue(text.contains("やる気↑"), "非 ASCII がそのまま書かれていない: $text")
+    }
+
+    @Test
+    fun `日本語と絵文字を含む run が UTF-8 で往復する`() {
+        val root = newRoot()
+        val store = newStore(root)
+        val base = sampleRun("run-ja-1", evalPoint = 12000)
+        val document = base.copy(run = base.run.copy(note = "初見クリア🎉 評価点12,000"))
+
+        store.saveRun(document)
+
+        assertEquals(document, store.loadRun("run-ja-1"))
+        assertEquals(listOf("run-ja-1"), store.loadIndex().map { it.runId })
+
+        val text = String(Files.readAllBytes(runsDir(root).resolve("run-ja-1.json")), StandardCharsets.UTF_8)
+        assertTrue(text.contains("初見クリア🎉"), "日本語と絵文字がそのまま書かれていない: $text")
     }
 
     @Test
