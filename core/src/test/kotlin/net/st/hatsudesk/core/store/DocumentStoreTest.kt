@@ -1,5 +1,10 @@
 package net.st.hatsudesk.core.store
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.st.hatsudesk.core.model.CardMaster
 import net.st.hatsudesk.core.model.Run
 import net.st.hatsudesk.core.model.RunChallengeItem
@@ -9,12 +14,17 @@ import net.st.hatsudesk.core.model.RunIdol
 import net.st.hatsudesk.core.model.RunMemory
 import net.st.hatsudesk.core.model.RunSkill
 import net.st.hatsudesk.core.model.RunSupport
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -23,11 +33,18 @@ class DocumentStoreTest {
 
     private val tempDirs = mutableListOf<Path>()
 
-    private fun newStore(): DocumentStore {
+    /** ストアの root を作る。テストは root から `runs/` や `index/` を直接見る。 */
+    private fun newRoot(): Path {
         val dir = Files.createTempDirectory("hatsudesk-store-")
         tempDirs.add(dir)
-        return DocumentStore(dir)
+        return dir
     }
+
+    private fun newStore(root: Path = newRoot()): DocumentStore = DocumentStore(root)
+
+    private fun runsDir(root: Path): Path = root.resolve("runs")
+
+    private fun indexFile(root: Path): Path = root.resolve("index/runs.idx")
 
     @AfterTest
     fun cleanUp() {
@@ -95,24 +112,27 @@ class DocumentStoreTest {
 
     @Test
     fun `保存して読み戻すと同値`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         val document = sampleRun("run-1", evalPoint = 15400)
 
         store.saveRun(document)
 
         assertEquals(document, store.loadRun("run-1"))
         assertEquals(listOf(document), store.loadRuns())
-        assertTrue(Files.isRegularFile(store.runFiles().single()))
-        assertEquals("run-1.json", store.runFiles().single().fileName.toString())
+        val file = runsDir(root).resolve("run-1.json")
+        assertTrue(Files.isRegularFile(file))
+        assertEquals("run-1.json", file.fileName.toString())
     }
 
     @Test
     fun `保存は temp を残さず runs 直下の json だけになる`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         store.saveRun(sampleRun("run-1", evalPoint = 100))
         store.saveRun(sampleRun("run-2", evalPoint = 200))
 
-        val names = Files.newDirectoryStream(store.runFiles().first().parent).use { stream ->
+        val names = Files.newDirectoryStream(runsDir(root)).use { stream ->
             stream.map { it.fileName.toString() }.sorted()
         }
         assertEquals(listOf("run-1.json", "run-2.json"), names)
@@ -120,11 +140,12 @@ class DocumentStoreTest {
 
     @Test
     fun `壊れた JSON が1件あっても他の run は読める`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         store.saveRun(sampleRun("run-1", evalPoint = 100))
         store.saveRun(sampleRun("run-2", evalPoint = 200))
 
-        val broken = store.runFiles().first().parent.resolve("run-3.json")
+        val broken = runsDir(root).resolve("run-3.json")
         Files.writeString(broken, "{ \"run\": { \"id\": \"run-3\" ")
 
         val loaded = store.loadRuns().map { it.run.id }.sorted()
@@ -137,9 +158,10 @@ class DocumentStoreTest {
 
     @Test
     fun `未知のフィールドがあっても読める`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         store.saveRun(sampleRun("run-1", evalPoint = 100))
-        val file = store.runFiles().single()
+        val file = runsDir(root).resolve("run-1.json")
         val body = Files.readString(file).replaceFirst("{", "{ \"future_field\": 1,")
         Files.writeString(file, body)
 
@@ -147,34 +169,140 @@ class DocumentStoreTest {
     }
 
     @Test
+    fun `生成した index には版と entries が必ず書かれる`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+        store.saveRun(sampleRun("run-2", evalPoint = 200))
+
+        val text = Files.readString(indexFile(root))
+        val index = Json.parseToJsonElement(text).jsonObject
+
+        assertEquals(1, index["version"]?.jsonPrimitive?.int)
+        assertEquals(2, (index["entries"] as JsonArray).size)
+        assertTrue(text.contains("\"version\""), "版が JSON に出力されている: $text")
+    }
+
+    @Test
+    fun `版の無い index は runs から作り直す`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+
+        // version も entries も無い JSON。既定値で「版1・空」として受理してはいけない。
+        Files.writeString(indexFile(root), "{}")
+
+        val entries = store.loadIndex()
+
+        assertEquals(listOf("run-1"), entries.map { it.runId })
+        val rewritten = Json.parseToJsonElement(Files.readString(indexFile(root))).jsonObject
+        assertEquals(1, rewritten["version"]?.jsonPrimitive?.int)
+        assertEquals(1, (rewritten["entries"] as kotlinx.serialization.json.JsonArray).size)
+    }
+
+    @Test
+    fun `違う版の index は runs から作り直す`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+        Files.writeString(indexFile(root), "{\"version\": 999, \"entries\": []}")
+
+        val entries = store.loadIndex()
+
+        assertEquals(listOf("run-1"), entries.map { it.runId })
+        val rewritten = Json.parseToJsonElement(Files.readString(indexFile(root))).jsonObject
+        assertEquals(1, rewritten["version"]?.jsonPrimitive?.int)
+        assertEquals(listOf("run-1"), store.loadIndex().map { it.runId })
+    }
+
+    @Test
     fun `index を消しても runs から再生成できる`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         store.saveRun(sampleRun("run-1", evalPoint = 100))
         store.saveRun(sampleRun("run-2", evalPoint = 300))
 
-        val indexFile = store.runFiles().first().parent.parent.resolve("index/runs.idx")
-        assertTrue(Files.exists(indexFile))
-        Files.delete(indexFile)
+        assertTrue(Files.exists(indexFile(root)))
+        Files.delete(indexFile(root))
 
         val entries = store.loadIndex()
 
         assertEquals(listOf("run-1", "run-2"), entries.map { it.runId })
         assertEquals(listOf(100, 300), entries.map { it.evalPoint })
         assertEquals(listOf("idol-1", "idol-1"), entries.map { it.idolCardId })
-        assertTrue(Files.exists(indexFile), "再生成した索引が書き戻されている")
+        assertTrue(Files.exists(indexFile(root)), "再生成した索引が書き戻されている")
     }
 
     @Test
     fun `壊れた index も runs から再生成できる`() {
-        val store = newStore()
+        val root = newRoot()
+        val store = newStore(root)
         store.saveRun(sampleRun("run-1", evalPoint = 100))
-        val indexFile = store.runFiles().first().parent.parent.resolve("index/runs.idx")
-        Files.writeString(indexFile, "not json at all")
+        Files.writeString(indexFile(root), "not json at all")
 
         val entries = store.loadIndex()
 
         assertEquals(listOf("run-1"), entries.map { it.runId })
         assertEquals("run-1", store.loadRun(store.loadIndex().single().runId)?.run?.id)
+    }
+
+    @Test
+    fun `読めない run は IOException になり不完全な index を確定しない`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+        assertTrue(Files.exists(indexFile(root)))
+
+        // Linux ではディレクトリの readString が IOException になる。
+        Files.createDirectory(runsDir(root).resolve("bad.json"))
+
+        assertFailsWith<IOException> { store.loadRun("bad") }
+        assertFailsWith<IOException> { store.loadRuns() }
+        assertFailsWith<IOException> { store.saveRun(sampleRun("run-2", evalPoint = 200)) }
+
+        // 不完全な要約を有効な索引として残さない。次回も再生成を試みて同じ障害で失敗する。
+        assertFalse(Files.exists(indexFile(root)), "再生成に失敗した索引を残さない")
+        assertFailsWith<IOException> { store.loadIndex() }
+    }
+
+    @Test
+    fun `壊れた JSON のスキップと IOException の失敗は混ざらない`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+
+        Files.writeString(runsDir(root).resolve("broken.json"), "{ \"run\": ")
+        // 構文エラーだけならスキップして残りを返す。
+        assertEquals(listOf("run-1"), store.loadRuns().map { it.run.id })
+
+        Files.createDirectory(runsDir(root).resolve("io.json"))
+        // 読めないファイルが混ざったら、そこから先は失敗にする。
+        assertFailsWith<IOException> { store.loadRuns() }
+    }
+
+    @Test
+    fun `並行に保存しても両方の run が最終 index に残る`() {
+        val root = newRoot()
+        val store = newStore(root)
+        val ids = (1..8).map { "run-$it" }
+        val pool = Executors.newFixedThreadPool(ids.size)
+        try {
+            val start = CountDownLatch(1)
+            val futures = ids.mapIndexed { i, id ->
+                pool.submit {
+                    start.await()
+                    store.saveRun(sampleRun(id, evalPoint = (i + 1) * 100))
+                }
+            }
+            start.countDown()
+            futures.forEach { it.get(60, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        val entries = store.loadIndex()
+        assertEquals(ids.sorted(), entries.map { it.runId }.sorted())
+        assertEquals(ids.sorted(), store.loadRuns().map { it.run.id }.sorted())
     }
 
     @Test
