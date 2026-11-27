@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "net.st.gakumas.deck"
+    namespace = "net.st.hatsudesk"
     compileSdk = 37
     // androidx.compose.ui 1.13.0 が API 37.1 以上を要求するため 37.2 を指す
     compileSdkMinor = 2
@@ -15,7 +15,7 @@ android {
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
-        applicationId = "net.st.gakumas.deck"
+        applicationId = "net.st.hatsudesk"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

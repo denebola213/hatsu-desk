@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "gakumas-deck-viewer"
+rootProject.name = "hatsu-desk"
 include(":app")

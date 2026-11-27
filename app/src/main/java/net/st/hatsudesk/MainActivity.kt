@@ -1,4 +1,4 @@
-package net.st.gakumas.deck
+package net.st.hatsudesk
 
 import android.os.Build
 import android.os.Bundle
