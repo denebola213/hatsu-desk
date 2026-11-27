@@ -54,6 +54,10 @@ flowchart LR
 | 画面の自動操作 | `input text/keyevent`、`monkey`、`sendevent` | `adb_guard.py` |
 | 他パッケージの画面読取 | 前面が自パッケージでないときの `uiautomator dump` | `adb_guard.py` |
 
+ゲートは文字列の部分一致ではなく、コマンドのトークン解析で判定する。`git -C`、`-c`、`sh -c`／`bash -lc`、引用符、refspec（`HEAD:main`）、`gh api` 経由のマージを塞いである。回帰は `python3 harness/tests/test_hooks.py` で固定する。ゲートを触ったら必ず通す。
+
+adb の座標は数字リテラルしか受け付けない（`$X` などの変数展開は拒否）。`regions.json` が空のあいだは、すべてのタップが止まる。
+
 **ブランチ保護は private リポジトリ（無料枠）では使えない**（API が 403 を返す）。したがってサーバー側の強制は無く、このローカルフックが唯一の決定論的ゲートになる。フックを外すと規律だけが残る。
 
 `fail_closed: true` を付けているので、スクリプトが落ちた場合はツール呼び出しが通らず止まる。
