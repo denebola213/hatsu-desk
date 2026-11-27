@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "hatsu-desk"
 include(":app")
+include(":core")
