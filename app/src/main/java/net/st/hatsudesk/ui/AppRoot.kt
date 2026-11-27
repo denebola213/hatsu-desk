@@ -24,6 +24,9 @@ sealed interface Screen {
     data class RunDetail(val runId: String) : Screen
     data object CardDictionary : Screen
     data object ManualEntry : Screen
+
+    /** M1-a の暫定画面。投影と「いまのフレームを1枚保存」。 */
+    data object Projection : Screen
 }
 
 @Composable
@@ -64,7 +67,10 @@ fun HatsuDeskApp(repository: RunRepository) {
                     onOpenRun = { runId -> stack = stack + Screen.RunDetail(runId) },
                     onManualEntry = { stack = stack + Screen.ManualEntry },
                     onDictionary = { stack = stack + Screen.CardDictionary },
+                    onProjection = { stack = stack + Screen.Projection },
                 )
+
+                Screen.Projection -> ProjectionScreen(onBack = pop)
 
                 is Screen.RunDetail -> RunDetailScreen(
                     repository = repository,
