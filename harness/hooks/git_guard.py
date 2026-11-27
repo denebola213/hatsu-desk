@@ -71,6 +71,9 @@ def main():
     except Exception:
         ok()
 
+    if os.environ.get("HOOK_DEBUG"):
+        Path("/tmp/hook-payload.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
+
     if payload.get("tool_name") != "terminal":
         ok()
 
