@@ -10,6 +10,7 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
@@ -54,7 +55,7 @@ class CaptureOverlayButton(
     private var screen = ScreenSize(0, 0)
 
     /**
-     * 出し入れの段取り。**失敗しても View を残さない**（`addView` の後に listener の
+     * 出し入れの段取り。**外せなかった View は参照を失わない**（`addView` の後に listener の
      * 登録が失敗する経路があるため）。成否はここだけで決める。
      */
     private val attachment = OverlayAttachment(
@@ -72,23 +73,31 @@ class CaptureOverlayButton(
                     .onFailure { Log.w(LOG_TAG, "画面の変化の追従を止められませんでした", it) }
             }
 
+            override fun isOnScreen(): Boolean = this@CaptureOverlayButton.isOnScreen()
+
             override fun removeView(): Boolean {
-                // 外れているかを例外ではなく View の親で確かめる。二重に外しても安全。
-                if (!isOnScreen()) return true
-                return try {
-                    windowManager.removeViewImmediate(button)
-                    true
-                } catch (error: Throwable) {
-                    Log.e(LOG_TAG, "取得ボタンを外せませんでした", error)
-                    // 例外が出ても、実際に外れていれば成功として扱う。
-                    !isOnScreen()
-                } finally {
-                    params = null
+                // 外れているかを例外ではなく View の状態で確かめる。二重に外しても安全。
+                if (isOnScreen()) {
+                    try {
+                        windowManager.removeViewImmediate(button)
+                    } catch (error: Throwable) {
+                        Log.e(LOG_TAG, "取得ボタンを外せませんでした", error)
+                    }
                 }
+                // 例外なく戻っても外れているとは限らない。状態を見て決める。
+                val gone = !isOnScreen()
+                if (gone) params = null
+                return gone
             }
         },
+        attempts = REMOVE_ATTEMPTS,
+        // メインスレッドを長く止めない。View の detach は通常この間に反映される。
+        pause = { SystemClock.sleep(REMOVE_RETRY_DELAY_MS) },
     )
     private var position = OverlayPosition(0, 0)
+
+    /** 画面に載っているか。外せなかった場合は true のまま残る（＝参照を捨てなくてよい）。 */
+    val isAttached: Boolean get() = attachment.isAttached
 
     /** 一度でも位置を決めたか。取得のたびに隠しても位置を忘れない。 */
     private var placed = false
@@ -150,19 +159,23 @@ class CaptureOverlayButton(
         if (!shown) {
             // 権限が実行中に取り消された場合もここに来る。投影は止めない。
             Log.w(LOG_TAG, "取得ボタンを出せませんでした")
-            params = null
+            // 出したが外せなかった View は、参照を失わないよう呼出側が持ち続ける。
+            // 外れていることを確かめた場合だけレイアウトを捨てる。
+            if (!attachment.isAttached) params = null
         }
         return shown
     }
 
     /**
      * 隠す。**外れたかを返す。** 外れていなければ呼出側は保存を中止する
-     * （ボタンが写った1枚を残さない）。何度呼んでも安全。
+     * （ボタンが写った1枚を残さない）。外せなかった場合は出たままの状態を保つので、
+     * もう一度呼べば外し直せる。何度呼んでも安全。
      */
     fun hide(): Boolean = attachment.detach()
 
     /** 実際に画面に載っているか。状態の取り違えで「外したつもり」にならないよう見る。 */
-    private fun isOnScreen(): Boolean = button.parent != null || button.isAttachedToWindow
+    private fun isOnScreen(): Boolean =
+        button.parent != null || button.isAttachedToWindow || button.windowToken != null
 
     /**
      * 画面の大きさが変わった。ボタンが画面の外に残らないよう、位置を移し直す。
@@ -310,6 +323,10 @@ class CaptureOverlayButton(
 
         /** 最初に出す高さ（画面の高さに対する比）。 */
         const val START_Y_RATIO = 0.34f
+
+        /** 外れなかったときに試す回数と、試行の間の待ち。取得の待ち時間を大きくしない。 */
+        const val REMOVE_ATTEMPTS = 3
+        const val REMOVE_RETRY_DELAY_MS = 5L
 
         val FILL_COLOR = Color.argb(0x66, 0, 0, 0)
         val RING_COLOR = Color.argb(0xE6, 255, 255, 255)

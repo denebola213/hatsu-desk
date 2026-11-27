@@ -87,11 +87,10 @@ object CaptureController {
     private const val MAX_IMAGES = 2
 
     /**
-     * ボタンを隠してから、隠した後のフレームが2枚そろうのを待つ上限。
-     * **固定の撮影待ちではない。** 待つのはフレームの到着で、通常は2枚で 30〜40ms。
-     * ここは「合成が止まっている」と判断して諦めるまでの時間。1枚だけで妥協しないので、
-     * 2枚目が遅い端末でも取りこぼさないよう、諦めるまでの時間は長めに取る。
-     * それでも足りなければ保存しない（ボタン入りの1枚を残さない）。
+     * ボタンを隠してから、隠した後のフレームが届くのを待つ上限。
+     * **固定の撮影待ちではない。** 待つのはフレームの到着で、通常は次の1枚（60Hz で約17ms）。
+     * ここは「合成が止まっている」と判断して諦めるまでの時間で、諦めたら保存はしない。
+     * 条件は「隠した後に合成された1枚」。2枚目は待たない（待つほど押下時から絵がずれる）。
      */
     private const val OVERLAY_HIDE_TIMEOUT_MS = 600L
 
@@ -128,16 +127,18 @@ object CaptureController {
     /**
      * 届いたフレームの置き場。**セッション世代ごとに分ける。** 停止→即再開で旧
      * `ImageReader` のコールバックが遅れて来ても、古い世代なら捨てる（[FrameStore]）。
+     * 時刻は `Image.getTimestamp()`（ns、`System.nanoTime()` と同じ単調時計）。
      */
-    private val frameStore = FrameStore<Image> { image -> image.close() }
+    private val frameStore = FrameStore<Image>(
+        close = { image -> image.close() },
+        stampOf = { image -> image.timestamp },
+    )
 
     /**
      * 取得ボタン。投影中だけ存在する。停止・失効・サービス終了はどれも
      * [releaseLocked] を通るので、オーバーレイだけが残る経路は無い。
      */
     private var overlay: CaptureOverlayButton? = null
-
-    private val freshFrames = FreshFrameGate()
 
     /** 取得の最中か。連打で「隠す・戻す」が重ならないようにする（メインスレッドだけ）。 */
     private var capturing = false
@@ -297,8 +298,8 @@ object CaptureController {
                 Log.e(LOG_TAG, "フレームを取得できませんでした", error)
                 null
             } ?: return@setOnImageAvailableListener
-            // 通し番号は「ボタンを隠した後に届いたか」の判定にだけ使う。
-            // リスナーは1本の HandlerThread で走るので、加算で足りる。
+            // フレームの時刻（合成された時刻）は FrameStore が覚える。取得は「隠し終えた
+            // 時刻より後か」だけを見るので、ここで数えるものは無い。
             // 古い世代のフレームは、ここで閉じたうえで捨てられる（保存に使わない）。
             when (frameStore.offer(frameSession, image)) {
                 FrameOffer.STALE -> Unit
@@ -369,12 +370,14 @@ object CaptureController {
      *
      * **押した時点のフレームを先に確保してから隠す、では焼き付きは消えない。** バッファの
      * 最新フレームは自分が合成された後の絵なので、確保した1枚にボタンが写っている。
-     * 順序を逆にして、隠す → 隠した後に届いたフレームを待つ → 写し取る → 戻す、とする。
+     * 順序を逆にして、隠す → 隠した後に合成されたフレームを待つ → 写し取る → 戻す、とする。
      *
-     * 待つのは時間ではなくフレームの到着（[FrameStore.Session.serial]）。隠した後に
-     * **通し番号が2つ以上進む**まで待ち、足りなければ保存しない（[CapturePlan]）。
-     * 1枚だけで保存すると、その1枚が「隠す前に生成され、キューに残っていた」ボタン入りの
-     * フレームであり得る。ボタン入りの画像を残すより、失敗させて押し直してもらう。
+     * 待つのは枚数ではなく時刻（[CapturePlan]）。`Image.getTimestamp()` はフレームが
+     * 合成された時刻（ns、`System.nanoTime()` と同じ単調時計）なので、hide が完了した
+     * 時刻と比べれば、隠す前に生成されてキューに残っていたフレームは必ず落ちる。
+     * 通し番号では「隠す前に合成された2枚」を「隠した後の2枚」と数えてしまい得た。
+     *
+     * 条件を満たす**最初の1枚**で撮る。2枚目は待たない。
      *
      * 隠すボタンが無い（オーバーレイ未許可）ときは待たない。静止した画面では新しい
      * フレームが来ないので、待つと必ず失敗する。いまの最新1枚をそのまま保存する。
@@ -397,15 +400,13 @@ object CaptureController {
         capturing = true
         val pressedAt = SystemClock.elapsedRealtime()
         val button = overlay
-        // 隠す前に待つべき番号を決める（隠した後に届いた分だけを数える）。
-        val plan = CapturePlan.forPress(
-            pressSerial = frames.serial.value,
-            hidesOverlay = button != null,
-            gate = freshFrames,
-        )
         // 隠せなかったら撮らない。隠れていないボタンが写った1枚を残さない。
         val hidden = button?.hide() ?: true
+        // ここが「隠し終えた時刻」。外れたことを確かめた直後に読む。フレームの時刻と
+        // 同じ単調時計なので、そのまま比べられる（ms に丸めない）。
+        val hideCompletedAtNanos = if (button != null) System.nanoTime() else null
         val hiddenAt = SystemClock.elapsedRealtime()
+        val plan = CapturePlan.forPress(hideCompletedAtNanos)
 
         scope.launch {
             // 隠せたときだけ戻す。隠せていない（状態が不確かな）ときに show() を呼ぶと、
@@ -418,26 +419,25 @@ object CaptureController {
                     if (notifyWithToast) toast(text)
                     return@launch
                 }
-                val outcome = when {
-                    !plan.waitsForFrames -> plan.outcome(frames.serial.value)
-                    else -> {
-                        val reached = withTimeoutOrNull(OVERLAY_HIDE_TIMEOUT_MS) {
-                            frames.serial.first { plan.outcome(it) != CapturePlan.Outcome.TOO_FEW }
-                        }
-                        plan.outcome(reached ?: frames.serial.value)
+                if (plan.waitsForFrames) {
+                    // 条件を満たす最初の1枚まで待つ。すでに満たす1枚がバッファにあれば
+                    // first はその場で返るので、余計な待ちは足さない。
+                    val arrived = withTimeoutOrNull(OVERLAY_HIDE_TIMEOUT_MS) {
+                        frames.stamp.first { plan.accepts(it) }
+                    }
+                    if (arrived == null) {
+                        // 隠した後に合成されたフレームが来なかった。それが隠す前のフレーム
+                        // かもしれないので保存しない。
+                        setMessage(CapturePlan.STALLED_MESSAGE)
+                        if (notifyWithToast) toast(CapturePlan.STALLED_MESSAGE)
+                        return@launch
                     }
                 }
-                if (outcome == CapturePlan.Outcome.TOO_FEW) {
-                    // 1枚しか来なかった。それが隠す前のフレームかもしれないので保存しない。
-                    setMessage(CapturePlan.STALLED_MESSAGE)
-                    if (notifyWithToast) toast(CapturePlan.STALLED_MESSAGE)
-                    return@launch
-                }
-                val snapshot = grabFrame(frames)
+                val snapshot = grabFrame(frames, plan.hiddenAtNanos)
                 // 画素を写し取ったらすぐ戻す。PNG の圧縮と書き込みの間、画面に穴を空けない。
                 pendingRestore?.let { restoreOverlay(it) }
                 pendingRestore = null
-                val shownAt = SystemClock.elapsedRealtime()
+                val grabbedAt = SystemClock.elapsedRealtime()
 
                 if (snapshot == null) {
                     setMessage("フレームがありません")
@@ -454,7 +454,8 @@ object CaptureController {
                 Log.i(
                     LOG_TAG,
                     "capture: press→hidden=${hiddenAt - pressedAt}ms, " +
-                        "hidden→restored=${shownAt - hiddenAt}ms, outcome=$outcome, " +
+                        "hidden→grab=${grabbedAt - hiddenAt}ms, " +
+                        "grab→done=${totalMs - (grabbedAt - pressedAt)}ms, " +
                         "total=${totalMs}ms, bytes=${file.sizeBytes}",
                 )
                 synchronized(this@CaptureController) {
@@ -493,11 +494,17 @@ object CaptureController {
             return
         }
         val button = CaptureOverlayButton(context) { captureFromOverlay() }
-        overlay = if (button.show()) {
-            button
+        if (button.show()) {
+            overlay = button
+            return
+        }
+        // 出したものの外せなかった View は、停止時に外せるよう参照を残す。
+        // 参照を失うと、画面に残ったボタンを二度と消せない。
+        if (button.isAttached) {
+            overlay = button
+            message = "取得ボタンの準備に失敗しました"
         } else {
             message = "取得ボタンを出せませんでした"
-            null
         }
     }
 
@@ -544,7 +551,7 @@ object CaptureController {
         releasing = true
         try {
             // オーバーレイは投影より先に消す。投影が止まった後にボタンだけ残る経路を作らない。
-            // 参照を捨てる前に外し、外せなかったことは記録する（黙って握りつぶさない）。
+            // 外せなかったときは参照を捨てない（次の停止・取得で外し直せるようにする）。
             val button = overlay
             overlay = null
             if (button != null) {
@@ -554,7 +561,10 @@ object CaptureController {
                     Log.e(LOG_TAG, "取得ボタンを外せませんでした", error)
                     false
                 }
-                if (!removed) Log.e(LOG_TAG, "取得ボタンが画面に残っています")
+                if (!removed) {
+                    overlay = button
+                    Log.e(LOG_TAG, "取得ボタンが画面に残っています。次の停止で外し直します")
+                }
             }
             // 世代ごと捨てる。以後その世代へ届いたフレームは閉じられ、保存に使われない。
             frameStore.end()
@@ -576,10 +586,19 @@ object CaptureController {
         }
     }
 
-    /** 最新1枚を Bitmap に写し取る。バッファからは消さない。呼出側が recycle する。 */
-    private suspend fun grabFrame(frames: FrameStore.Session<Image>): Bitmap? =
+    /**
+     * 最新1枚を Bitmap に写し取る。バッファからは消さない。呼出側が recycle する。
+     * [sinceNanos] を渡したときは、その時刻以降に合成された1枚だけを写す
+     * （隠す前に生成されたフレームを保存に使わない）。
+     */
+    private suspend fun grabFrame(frames: FrameStore.Session<Image>, sinceNanos: Long?): Bitmap? =
         withContext(Dispatchers.Default) {
-            frameStore.withLatest(frames) { image -> image.copyToBitmap() }
+            val copy: (Image) -> Bitmap = { image -> image.copyToBitmap() }
+            if (sinceNanos == null) {
+                frameStore.withLatest(frames, copy)
+            } else {
+                frameStore.withLatestAfter(frames, sinceNanos, copy)
+            }
         }
 
     /** PNG にして `captures/` へ書く。書けたらファイルと保存後の枚数。失敗は null。 */

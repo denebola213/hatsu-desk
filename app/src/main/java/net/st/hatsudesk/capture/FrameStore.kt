@@ -3,12 +3,17 @@ package net.st.hatsudesk.capture
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * セッション世代ごとの「最新1枚」と、届いた枚数の通し番号を持つ。
+ * セッション世代ごとの「最新1枚」と、そのフレームが合成された時刻を持つ。
  *
  * 設計 §4.1 の「リングバッファは持たない」をそのまま表す。**取り出しても消えない。**
  * 保存は「保持している1枚を写し取る」だけで、バッファは空にならない。画面が静止していると
  * `VirtualDisplay` は新しいフレームを出さないことがある（実機で確認済み: 消費する作りだと
  * 2枚目以降が保存できない）。
+ *
+ * **時刻で選ぶ理由。** 「何枚届いたか」では、隠す前に合成されたフレームが隠した後に
+ * 遅れて届いた場合を排除できない（`ImageReader` のコールバックは隠す処理と同期しない）。
+ * フレームの時刻（`Image.getTimestamp()`）は合成された時刻そのものなので、
+ * 隠し終えた時刻と比べればよい。[Session.stamp] が待ち合わせの合図になる。
  *
  * **世代で分ける理由。** 停止してすぐ始め直すと、旧 `ImageReader` のコールバックが
  * 遅れて走ることがある。世代を見ずに受けると、古い世代のフレーム（停止前の、ボタンが
@@ -16,24 +21,34 @@ import kotlinx.coroutines.flow.MutableStateFlow
  * 古い世代の [Session] へ届いたフレームは閉じて捨てる。
  *
  * 型を閉じないのは、`android.media.Image` を直接持つと JVM の単体テストで動かせないため。
- * 閉じる処理は呼出側から渡す（[close]）。フレームの持ち主はこのクラスだけで、閉じるのは
+ * 閉じる処理と時刻の読み方は呼出側から渡す（[close]・[stampOf]）。フレームの持ち主は
+ * このクラスだけで、閉じるのは
  * - 新しいフレームに置き換えられたとき（[offer]）
  * - [end] / [begin] で世代を捨てたとき（[end]）
  * - 古い世代に届いたとき（[offer]）
- * の3経路で、どれも1回だけ。呼出側は [withLatest] のブロックの中で画素を写し取るだけで、
- * `close()` を呼ばない。
+ * の3経路で、どれも1回だけ。呼出側は [withLatest] / [withLatestAfter] のブロックの中で
+ * 画素を写し取るだけで、`close()` を呼ばない。
  *
  * 読む側（ImageReader の HandlerThread）と保存する側（IO）が別スレッドなので同期する。
  */
-internal class FrameStore<T>(private val close: (T) -> Unit) {
+internal class FrameStore<T>(
+    private val close: (T) -> Unit,
+    private val stampOf: (T) -> Long,
+) {
 
     /** 1回の投影セッション。世代番号は [begin] のたびに増える。 */
     class Session<T> internal constructor(val generation: Long) {
 
         internal var latest: T? = null
 
-        /** この世代で届いたフレームの通し番号。1枚ごとに +1（世代ごとに 0 から）。 */
-        val serial = MutableStateFlow(0L)
+        /** [latest] が合成された時刻（ns）。まだ1枚も来ていなければ [Long.MIN_VALUE]。 */
+        internal var latestStamp: Long = Long.MIN_VALUE
+
+        /**
+         * 最後に届いたフレームの時刻。フレームが来るたびに進む。
+         * [latest] を読む前にこの値で「隠した後のフレームか」を待ち合わせる。
+         */
+        val stamp = MutableStateFlow(Long.MIN_VALUE)
     }
 
     private var lastGeneration = 0L
@@ -58,6 +73,9 @@ internal class FrameStore<T>(private val close: (T) -> Unit) {
     /**
      * [session] のフレームとして受け取る。古い世代なら閉じて捨てる（＝新しい世代の
      * 保存に使わせない）。
+     *
+     * 時刻は「届いた時刻」ではなく「フレームが合成された時刻」（[stampOf]）を覚える。
+     * 受け取った順と合成された順がずれても、判定は合成時刻だけで行う。
      */
     @Synchronized
     fun offer(session: Session<T>, frame: T): FrameOffer {
@@ -68,8 +86,11 @@ internal class FrameStore<T>(private val close: (T) -> Unit) {
         val wasEmpty = session.latest == null
         val previous = session.latest
         session.latest = frame
+        session.latestStamp = stampOf(frame)
         previous?.let(close)
-        session.serial.value = session.serial.value + 1
+        // latest と latestStamp を更新してから知らせる。待っている側は起こされた時点で
+        // 両方を読める（どちらもこのロックの中）。
+        session.stamp.value = session.latestStamp
         return if (wasEmpty) FrameOffer.FIRST else FrameOffer.NEXT
     }
 
@@ -90,6 +111,21 @@ internal class FrameStore<T>(private val close: (T) -> Unit) {
     fun <R> withLatest(session: Session<T>, block: (T) -> R): R? {
         if (current !== session) return null
         val frame = session.latest ?: return null
+        return block(frame)
+    }
+
+    /**
+     * [sinceNanos] 以降に合成された最新フレームだけを [block] に渡す。
+     * 保持している1枚が古ければ null（＝隠す前の絵を保存に使わない）。
+     *
+     * 待ち合わせ（[Session.stamp]）で条件を満たした後に呼ぶ。待っている間にさらに新しい
+     * フレームへ置き換わっていても、時刻は単調なので条件は満たしたままになる。
+     */
+    @Synchronized
+    fun <R> withLatestAfter(session: Session<T>, sinceNanos: Long, block: (T) -> R): R? {
+        if (current !== session) return null
+        val frame = session.latest ?: return null
+        if (session.latestStamp < sinceNanos) return null
         return block(frame)
     }
 

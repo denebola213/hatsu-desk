@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * セッション世代の分離（PR #22 の指摘 5）。
+ * セッション世代の分離と、フレームの時刻（PR #22 の指摘 5・1）。
  *
  * 停止してすぐ始め直すと、旧 `ImageReader` のコールバックが遅れて走ることがある。
  * 古い世代のフレームが新しい世代の保存に混ざらないことを、フレームの型を String に
@@ -16,12 +16,22 @@ import org.junit.Test
 class FrameStoreTest {
 
     private val closed = mutableListOf<String>()
-    private val store = FrameStore<String> { closed += it }
+    private val stamps = mutableMapOf<String, Long>()
+    private val store = FrameStore<String>(
+        close = { frame -> closed += frame },
+        stampOf = { frame -> stamps.getValue(frame) },
+    )
+
+    /** フレームを届ける。時刻は「合成された時刻」で、届いた順とは別に指定できる。 */
+    private fun deliver(session: FrameStore.Session<String>, frame: String, atNanos: Long): FrameOffer {
+        stamps[frame] = atNanos
+        return store.offer(session, frame)
+    }
 
     @Test
-    fun `古い世代のフレームは新しい世代の保存に使われない`() {
+    fun oldGenerationFramesAreNotUsed() {
         val old = store.begin()
-        store.offer(old, "ボタン入り")
+        deliver(old, "ボタン入り", 1_000)
 
         // 停止してすぐ始め直した（＝新しい世代）。
         val fresh = store.begin()
@@ -34,18 +44,18 @@ class FrameStoreTest {
         assertNull(store.withLatest(old) { it })
         assertFalse(store.hasFrame(old))
 
-        store.offer(fresh, "新しいフレーム")
+        deliver(fresh, "新しいフレーム", 2_000)
         assertEquals("新しいフレーム", store.withLatest(fresh) { it })
-        assertEquals(1L, fresh.serial.value)
+        assertEquals(2_000L, fresh.stamp.value)
 
         // 捨てたフレームは閉じる（持ち主は FrameStore だけ）。
         assertEquals(listOf("ボタン入り", "遅れて届いた古いフレーム"), closed)
     }
 
     @Test
-    fun `停止後のフレームは捨てる`() {
+    fun framesAfterStopAreDropped() {
         val session = store.begin()
-        store.offer(session, "フレーム")
+        deliver(session, "フレーム", 1_000)
         assertTrue(store.hasFrame())
 
         store.end()
@@ -58,34 +68,50 @@ class FrameStoreTest {
     }
 
     @Test
-    fun `通し番号は世代ごとに0から数える`() {
+    fun stampIsScopedToGeneration() {
         val first = store.begin()
-        store.offer(first, "a")
-        store.offer(first, "b")
-        assertEquals(2L, first.serial.value)
+        assertEquals(Long.MIN_VALUE, first.stamp.value)
+        deliver(first, "a", 1_000)
+        deliver(first, "b", 2_000)
+        assertEquals(2_000L, first.stamp.value)
 
         val second = store.begin()
-        assertEquals(0L, second.serial.value)
+        assertEquals(Long.MIN_VALUE, second.stamp.value)
 
-        // 古い世代の番号は進まない（遅れて来ても新しい世代の待ち合わせを満たさない）。
-        store.offer(first, "c")
-        assertEquals(2L, first.serial.value)
-        assertEquals(0L, second.serial.value)
+        // 古い世代の時刻は進まない（遅れて来ても新しい世代の待ち合わせを満たさない）。
+        deliver(first, "c", 3_000)
+        assertEquals(2_000L, first.stamp.value)
+        assertEquals(Long.MIN_VALUE, second.stamp.value)
     }
 
     @Test
-    fun `置き換えたフレームは閉じる`() {
+    fun withLatestAfterReturnsOnlyNewerFrame() {
         val session = store.begin()
-        assertEquals(FrameOffer.FIRST, store.offer(session, "1枚目"))
-        assertEquals(FrameOffer.NEXT, store.offer(session, "2枚目"))
+        deliver(session, "隠す前", 1_000)
+
+        // 隠し終えた時刻が 1_500。保持している1枚は隠す前なので渡さない。
+        assertNull(store.withLatestAfter(session, 1_500) { it })
+
+        deliver(session, "隠した後", 2_000)
+        assertEquals("隠した後", store.withLatestAfter(session, 1_500) { it })
+
+        // さらに後の時刻を要求すれば、まだ来ていないので渡さない。
+        assertNull(store.withLatestAfter(session, 2_500) { it })
+    }
+
+    @Test
+    fun replacedFrameIsClosed() {
+        val session = store.begin()
+        assertEquals(FrameOffer.FIRST, deliver(session, "1枚目", 1_000))
+        assertEquals(FrameOffer.NEXT, deliver(session, "2枚目", 2_000))
         assertEquals(listOf("1枚目"), closed)
         assertEquals("2枚目", store.withLatest(session) { it })
     }
 
     @Test
-    fun `取り出しても消えない`() {
+    fun takingDoesNotConsume() {
         val session = store.begin()
-        store.offer(session, "フレーム")
+        deliver(session, "フレーム", 1_000)
         assertEquals("フレーム", store.withLatest(session) { it })
         assertEquals("フレーム", store.withLatest(session) { it })
         assertTrue(store.hasFrame())

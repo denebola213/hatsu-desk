@@ -1,46 +1,43 @@
 package net.st.hatsudesk.capture
 
 /**
- * 1回の取得で、何を待ち、保存してよいかを決める。
+ * 1回の取得で、何を待ち、どのフレームを保存してよいかを決める。
  *
- * 待つのは時間ではなくフレームの到着だが、**待つかどうかは「隠すボタンがあったか」で変わる**。
+ * 待つのは**隠し終えた時刻より後に生成されたフレームの到着**で、枚数ではない。
+ * `ImageReader` のコールバックは隠す処理と同期しないため、「何枚届いたか」では
+ * 隠す前に合成されたフレームを数えてしまう。フレームが合成された時刻
+ * （`Image.getTimestamp()`）と、[CaptureOverlayButton.hide] が完了した時刻を
+ * 同じ単調時計で比べれば、隠す前に生成されたフレームは必ず落ちる。
  *
- * - 隠すものが無い（オーバーレイ未許可）: 待たずに、いま保持している最新1枚を使う。
- *   静止した画面では `VirtualDisplay` が新しいフレームを出さないので、待つと必ず失敗する。
- * - 隠した: 隠した後に届いたフレームが [FreshFrameGate.REQUIRED_FRAMES] 枚以上になるまで待つ。
- *   1枚で妥協すると、その1枚が「隠す前に生成され、キューに残っていた」ボタン入りの
- *   フレームである可能性を排除できない。上限まで待っても足りなければ**保存しない**
- *   （ボタン入りの1枚を残すより、失敗させて押し直してもらう）。
+ * 時刻はミリ秒に丸めない。`System.nanoTime()` は `SystemClock.uptimeMillis()` と同じ
+ * 単調時計（CLOCK_MONOTONIC）で、`Image.getTimestamp()` の基準でもある。ms に丸めると、
+ * 同じミリ秒の中で hide 完了前に合成されたフレームを採る隙ができる。
+ *
+ * 条件を満たす**最初の1枚**で撮る。2枚目は待たない（待つほど押下時から絵がずれる）。
+ *
+ * 隠すボタンが無い（オーバーレイ未許可）ときは待たない。静止した画面では
+ * `VirtualDisplay` が新しいフレームを出さないので、待つと必ず失敗する。
  *
  * 判定だけを持つ。実際に隠す・待つ・写し取るのは `CaptureController`。
  */
 internal class CapturePlan private constructor(
-    /** 押した時点の通し番号。 */
-    val pressSerial: Long,
-    /** 隠すボタンがあったか。無ければフレームの到着を待たない。 */
-    val hidesOverlay: Boolean,
-    private val gate: FreshFrameGate,
+    /**
+     * 隠し終えた時刻。フレームの時刻と同じ単調時計のナノ秒。
+     * null は「隠すボタンが無い」＝待たずに最新1枚を使う。
+     */
+    val hiddenAtNanos: Long?,
 ) {
 
     /** フレームの到着を待つか。 */
-    val waitsForFrames: Boolean get() = hidesOverlay
+    val waitsForFrames: Boolean get() = hiddenAtNanos != null
 
-    /** 通し番号が [serial] まで進んだ時点の判定。 */
-    fun outcome(serial: Long): Outcome = when {
-        !hidesOverlay -> Outcome.LATEST
-        gate.isReady(serial) -> Outcome.FRESH
-        else -> Outcome.TOO_FEW
-    }
-
-    enum class Outcome {
-        /** 待たずに、保持している最新1枚を保存してよい。 */
-        LATEST,
-
-        /** 隠した後に届いたフレームを保存してよい。 */
-        FRESH,
-
-        /** 隠した後に十分な枚数が来なかった。**保存してはいけない。** */
-        TOO_FEW,
+    /**
+     * [timestampNanos] に合成されたフレームを保存に使ってよいか。
+     * 隠すボタンが無いときは何でもよい（隠す前の絵という概念が無い）。
+     */
+    fun accepts(timestampNanos: Long): Boolean {
+        val from = hiddenAtNanos ?: return true
+        return timestampNanos >= from
     }
 
     companion object {
@@ -48,16 +45,11 @@ internal class CapturePlan private constructor(
         const val STALLED_MESSAGE = "画面が止まっていて撮れませんでした。もう一度押してください"
 
         /**
-         * 押した時点の段取りを決める。隠すときは、その時点の通し番号を [gate] に渡して
-         * 「ここから何枚進んだか」を数えられるようにする。
+         * 押した時点の段取りを決める。
+         *
+         * @param hideCompletedAtNanos [CaptureOverlayButton.hide] が true を返した
+         *   直後の `System.nanoTime()`。null は隠すボタンが無かった場合。
          */
-        fun forPress(
-            pressSerial: Long,
-            hidesOverlay: Boolean,
-            gate: FreshFrameGate,
-        ): CapturePlan {
-            if (hidesOverlay) gate.after(pressSerial)
-            return CapturePlan(pressSerial, hidesOverlay, gate)
-        }
+        fun forPress(hideCompletedAtNanos: Long?): CapturePlan = CapturePlan(hideCompletedAtNanos)
     }
 }
