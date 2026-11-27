@@ -343,21 +343,24 @@ object CaptureController {
     }
 
     private suspend fun writeOneFrame() {
-        val frames = buffer
-        val image = frames?.take() ?: run {
+        val frames = buffer ?: run {
             setMessage("フレームがありません")
             return
         }
         val file = try {
             withContext(Dispatchers.IO) {
-                try {
-                    val bytes = encodePng(image) ?: throw IOException("PNG に変換できませんでした")
-                    val store = captureStore()
-                    store.save(uniqueName(store.list().map { it.name }.toSet()), bytes)
-                } finally {
-                    // 取った Image は必ず閉じる。閉じ忘れると maxImages を食い潰して
-                    // フレームが来なくなる（設計 §4.1 の常時バッファが止まる）。
-                    image.close()
+                // 最新1枚を写し取る。バッファからは消さない（静止画でも何度でも保存できる）。
+                val snapshot = frames.withLatest { image -> image.copyToBitmap() }
+                if (snapshot == null) {
+                    null
+                } else {
+                    try {
+                        val store = captureStore()
+                        val name = uniqueName(store.list().map { it.name }.toSet())
+                        store.save(name, compressPng(snapshot))
+                    } finally {
+                        snapshot.recycle()
+                    }
                 }
             }
         } catch (cancel: CancellationException) {
@@ -365,6 +368,11 @@ object CaptureController {
         } catch (error: Throwable) {
             Log.e(LOG_TAG, "フレームを保存できませんでした", error)
             setMessage("保存に失敗しました（${describe(error)}）")
+            return
+        }
+
+        if (file == null) {
+            setMessage("フレームがまだ届いていません")
             return
         }
 
@@ -377,31 +385,35 @@ object CaptureController {
         }
     }
 
-    /** RGBA_8888 の [Image] を PNG のバイト列にする。行のパディングは落とす。 */
-    private fun encodePng(image: Image): ByteArray? {
-        val plane = image.planes.first()
+    /**
+     * RGBA_8888 の [Image] から、行のパディングを落とした [Bitmap] を作る。
+     * 呼出側が持ち主になる（使い終わったら `recycle()`）。
+     */
+    private fun Image.copyToBitmap(): Bitmap {
+        val plane = planes.first()
         val pixelStride = plane.pixelStride
-        if (pixelStride <= 0) return null
+        if (pixelStride <= 0) throw IOException("画素の間隔が読めません")
         val paddedWidth = plane.rowStride / pixelStride
-        val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+        val padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
         try {
             plane.buffer.rewind()
             padded.copyPixelsFromBuffer(plane.buffer)
-            val visible = if (paddedWidth == image.width) {
-                padded
-            } else {
-                Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
-            }
-            try {
-                val out = ByteArrayOutputStream()
-                if (!visible.compress(Bitmap.CompressFormat.PNG, 100, out)) return null
-                return out.toByteArray()
-            } finally {
-                if (visible !== padded) visible.recycle()
-            }
-        } finally {
+            if (paddedWidth == width) return padded
+            val visible = Bitmap.createBitmap(padded, 0, 0, width, height)
             padded.recycle()
+            return visible
+        } catch (error: Throwable) {
+            padded.recycle()
+            throw error
         }
+    }
+
+    private fun compressPng(bitmap: Bitmap): ByteArray {
+        val out = ByteArrayOutputStream()
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+            throw IOException("PNG に変換できませんでした")
+        }
+        return out.toByteArray()
     }
 
     /** 同じミリ秒に2回押されても上書きしないよう、空いている名前まで連番を足す。 */
