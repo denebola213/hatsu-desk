@@ -1,12 +1,18 @@
 package net.st.hatsudesk.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import net.st.hatsudesk.data.RunRepository
 
 /** 画面。Navigation ライブラリは入れず、スタックを1つ持つだけで切り替える。 */
@@ -30,33 +36,41 @@ fun HatsuDeskApp(repository: RunRepository) {
 
     BackHandler(enabled = stack.size > 1) { pop() }
 
-    when (val current = stack.last()) {
-        Screen.RunList -> RunListScreen(
-            repository = repository,
-            generation = listGeneration,
-            onOpenRun = { runId -> stack = stack + Screen.RunDetail(runId) },
-            onManualEntry = { stack = stack + Screen.ManualEntry },
-            onDictionary = { stack = stack + Screen.CardDictionary },
-        )
+    // 端末の安全領域（ステータスバー・ジェスチャーバー・切り欠き）をここで一度だけ空ける。
+    // Android 15 以降は edge-to-edge が強制されるので、各画面に任せずルートで受ける。
+    Box(
+        Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
+        when (val current = stack.last()) {
+            Screen.RunList -> RunListScreen(
+                repository = repository,
+                generation = listGeneration,
+                onOpenRun = { runId -> stack = stack + Screen.RunDetail(runId) },
+                onManualEntry = { stack = stack + Screen.ManualEntry },
+                onDictionary = { stack = stack + Screen.CardDictionary },
+            )
 
-        is Screen.RunDetail -> RunDetailScreen(
-            repository = repository,
-            runId = current.runId,
-            onBack = pop,
-        )
+            is Screen.RunDetail -> RunDetailScreen(
+                repository = repository,
+                runId = current.runId,
+                onBack = pop,
+            )
 
-        Screen.CardDictionary -> CardDictionaryScreen(
-            repository = repository,
-            onBack = pop,
-        )
+            Screen.CardDictionary -> CardDictionaryScreen(
+                repository = repository,
+                onBack = pop,
+            )
 
-        Screen.ManualEntry -> ManualEntryScreen(
-            repository = repository,
-            onBack = pop,
-            onSaved = {
-                listGeneration += 1
-                stack = listOf(Screen.RunList)
-            },
-        )
+            Screen.ManualEntry -> ManualEntryScreen(
+                repository = repository,
+                onBack = pop,
+                onSaved = {
+                    listGeneration += 1
+                    stack = listOf(Screen.RunList)
+                },
+            )
+        }
     }
 }
