@@ -6,7 +6,7 @@ SilverBullet（notes.st-albireo.net）にも同じ内容の写しがある。読
 
 ## 文書
 
-- [設計 v0.7](design/01-ranking-deck-viewer.md) — 現在の姿。上書きして育てる
+- [設計 v0.8](design/01-ranking-deck-viewer.md) — 現在の姿。上書きして育てる
 - [ビルド環境](build-environment.md) — コンテナと固定している版
 
 ## ADR
@@ -25,6 +25,7 @@ SilverBullet（notes.st-albireo.net）にも同じ内容の写しがある。読
 | [0008](adr/0008-mlkit-bundled-japanese.md) | OCR は ML Kit の日本語 bundled を使う |
 | [0009](adr/0009-card-dictionary-grown-by-capture.md) | カード辞書は同梱せず、詳細撮影で育てる |
 | [0010](adr/0010-enforce-no-internet.md) | 通信権限を持たないことをビルドで強制する |
+| [0011](adr/0011-core-stays-within-android-api.md) | `:core` で使う JDK API を Android の API 水準に収める |
 
 ## 読み方
 
