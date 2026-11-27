@@ -64,7 +64,10 @@ def installation_token(app_id: str, inst_id: str, key_path: str) -> str:
 def main() -> None:
     app_id = os.environ.get("GH_APP_ID")
     inst_id = os.environ.get("GH_APP_INSTALLATION_ID")
-    key_path = os.environ.get("GH_APP_KEY", os.path.expanduser("~/.hermes/secrets/gh-app.pem"))
+    key_path = os.environ.get(
+        "GH_APP_KEY",
+        os.path.join(os.environ.get("HERMES_HOME", "/home/hermeswebui/.hermes"), "secrets", "gh-app.pem"),
+    )
     if not app_id or not inst_id:
         print("GH_APP_ID と GH_APP_INSTALLATION_ID を設定する", file=sys.stderr)
         sys.exit(2)
