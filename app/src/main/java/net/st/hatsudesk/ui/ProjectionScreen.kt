@@ -70,8 +70,11 @@ fun ProjectionScreen(onBack: () -> Unit) {
         if (intent != null) consent.launch(intent)
     }
 
-    // 通知が許可されていなくても投影は続けられる（Android 13 以降は通知が出ないだけ）。
+    // 通知は「あれば使う」だけ。Android 13 以降で拒否されると前面サービスの通知は
+    // ドロワーに出ないが、停止はこの画面の「投影を停止」で行えるので、拒否されても
+    // そのまま同意へ進む（投影を止められない状態を作らない）。
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        // 許可・拒否のどちらでも開始を続ける。結果は通知が出るかどうかにしか影響しない。
         if (waitingForNotification) {
             waitingForNotification = false
             launchConsent()
@@ -113,6 +116,13 @@ fun ProjectionScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(8.dp))
             Button(
+                onClick = { CaptureController.stop("投影を停止しました") },
+                enabled = state.canStop,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("投影を停止") }
+
+            Spacer(Modifier.height(8.dp))
+            Button(
                 onClick = { CaptureController.save() },
                 enabled = state.canSave,
                 modifier = Modifier.fillMaxWidth(),
@@ -122,7 +132,8 @@ fun ProjectionScreen(onBack: () -> Unit) {
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
             Text(
-                "停止は通知の「停止」から行います。停止すると投影は終わり、次に始めるときは" +
+                "停止はこの画面の「投影を停止」から行えます（通知が出ているときは通知の" +
+                    "「停止」からも止められます）。停止すると投影は終わり、次に始めるときは" +
                     "もう一度同意が必要です。",
                 style = MaterialTheme.typography.bodySmall,
             )

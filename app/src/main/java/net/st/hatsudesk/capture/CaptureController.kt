@@ -44,6 +44,14 @@ data class CaptureState(
 ) {
     /** 保存ボタンを押せるか。投影中で、フレームが1枚以上届いていること。 */
     val canSave: Boolean get() = status == ProjectionSession.State.RUNNING && hasFrame
+
+    /**
+     * 停止ボタンを押せるか。投影中だけ。
+     *
+     * **通知の権限に依存させない。** 通知が出ない環境（Android 13 以降で拒否）でも
+     * 画面から投影を止められるようにするため、ここはセッションの状態だけで決める。
+     */
+    val canStop: Boolean get() = status == ProjectionSession.State.RUNNING
 }
 
 /**
