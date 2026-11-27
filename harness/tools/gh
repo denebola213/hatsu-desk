@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 dir=$(cd "$(dirname "$0")" && pwd)
-. "${HERMES_HOME:-/home/hermeswebui/.hermes}/secrets/gh-app.env"
+H="${HERMES_HOME:-/home/hermeswebui/.hermes}"
+case "${GH_APP_PROFILE:-impl}" in
+  review) envf=gh-review.env; key=gh-review.pem ;;
+  *)      envf=gh-app.env;    key=gh-app.pem ;;
+esac
+. "$H/secrets/$envf"
 export GH_APP_ID GH_APP_INSTALLATION_ID
+export GH_APP_KEY="$H/secrets/$key"
 exec /usr/local/bin/python3 "$dir/gh-app-token.py" -- gh "$@"

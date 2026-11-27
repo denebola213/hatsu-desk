@@ -76,11 +76,19 @@ public リポジトリでブランチ保護を有効にしてある（private �
 
 ## 承認とマージ
 
-- PR は App 名義で作る。**App は自分の PR を承認できない**（GitHub の仕様）
-- 承認は人間が押す。実装を回すエージェントに管理者権限を渡さないため、これが唯一意味のある分離
-- 2つ目の App をレビュー用に置けば形式上の承認は機械でも付くが、鍵が同じ場所にあるなら分離は名目だけ
-- マージは承認後にエージェントが実行してよい（`contents: write` で足りる）
-- 承認が要るので、レビュー担当は「承認まで」ではなく「承認依頼まで」を担う
+PR は実装用 App 名義で作る。**自分が作者の PR は自分で承認できない**（GitHub の仕様）。そこでレビュー用の App を別に置く。
+
+| 役割 | 権限 | 鍵 |
+| --- | --- | --- |
+| 実装 | contents: write / pull_requests: write | `~/.hermes/secrets/gh-app.pem` |
+| レビュー | contents: write / pull_requests: write | `~/.hermes/secrets/gh-review.pem` |
+
+**App の承認が保護の承認数に数えられる条件は `contents: write`。** 読み取り専用だと承認は記録されるが数えられず、マージは `405 At least 1 approving review is required by reviewers with write access` で弾かれる（実測）。write に変えた直後から同じ承認が数えられ、`mergeable_state` が `blocked` から `clean` に変わった。
+
+- 権限を変えてもインストールに反映されないことがある。App の JWT で `/app/installations/<id>` を引き、`permissions.contents` を見る
+- マージは実装用 App が実行する
+- 鍵が同じ FS にあるため**分離は名目**。実装側の資格で承認もできる。事故と取り違えを減らす仕組みであって、意図的な迂回は防げない
+- 資格は `GH_APP_PROFILE=review` で切り替える
 
 ## 境界（ここは動かさない）
 
