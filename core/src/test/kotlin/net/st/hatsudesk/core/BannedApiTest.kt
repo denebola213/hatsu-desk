@@ -125,6 +125,9 @@ class BannedApiTest {
             """
             package dummy
 
+            import java.nio.ByteBuffer
+            import java.nio.CharBuffer
+            import java.nio.charset.CodingErrorAction
             import java.nio.charset.StandardCharsets
             import java.nio.file.Files
             import java.nio.file.Path
@@ -132,16 +135,23 @@ class BannedApiTest {
             import java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
             import java.nio.file.StandardOpenOption.WRITE
 
-            fun readAll(path: Path): String = String(Files.readAllBytes(path), StandardCharsets.UTF_8)
+            // DocumentStore と同じ形。文字列 API ではなく REPORT 付きの変換を使う。
+            fun readAll(path: Path): String =
+                StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(Files.readAllBytes(path)))
+                    .toString()
 
-            fun writeAll(path: Path, body: String): Path =
-                Files.write(
-                    path,
-                    body.toByteArray(StandardCharsets.UTF_8),
-                    CREATE,
-                    TRUNCATE_EXISTING,
-                    WRITE,
-                )
+            fun writeAll(path: Path, body: String): Path {
+                val encoded = StandardCharsets.UTF_8.newEncoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .encode(CharBuffer.wrap(body))
+                val bytes = ByteArray(encoded.remaining())
+                encoded.get(bytes)
+                return Files.write(path, bytes, CREATE, TRUNCATE_EXISTING, WRITE)
+            }
             """.trimIndent(),
         )
 

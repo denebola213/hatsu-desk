@@ -15,6 +15,8 @@ import net.st.hatsudesk.core.model.RunMemory
 import net.st.hatsudesk.core.model.RunSkill
 import net.st.hatsudesk.core.model.RunSupport
 import java.io.IOException
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.MalformedInputException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -375,6 +377,96 @@ class DocumentStoreTest {
 
         val text = String(Files.readAllBytes(runsDir(root).resolve("run-ja-1.json")), StandardCharsets.UTF_8)
         assertTrue(text.contains("初見クリア🎉"), "日本語と絵文字がそのまま書かれていない: $text")
+    }
+
+    /**
+     * 不正な UTF-8 は「壊れた JSON」ではなく I/O 障害として扱う。
+     *
+     * `String(bytes, UTF_8)`（旧実装）は `c3 28` を U+FFFD と `(` に置き換えるため、下の
+     * JSON は置換経路では妥当な構文になり、run が黙って受理される。JDK の `Files.readString`
+     * と同じく置換せず [MalformedInputException] にすることを確かめる。
+     */
+    @Test
+    fun `不正な UTF-8 は置換せず MalformedInputException になる`() {
+        val root = newRoot()
+        val store = newStore(root)
+        val file = runsDir(root).resolve("run-bad-utf8.json")
+        val head = "{\"run\":{\"id\":\"run-bad-utf8\",\"ranking_id\":\"ranking-1\",\"note\":\""
+        val tail = "\"}}"
+        Files.write(
+            file,
+            head.toByteArray(StandardCharsets.UTF_8) +
+                byteArrayOf(0xC3.toByte(), 0x28) +
+                tail.toByteArray(StandardCharsets.UTF_8),
+        )
+
+        // 前提の固定: 置換経路なら U+FFFD + `(` になり、JSON として妥当になってしまう。
+        // だから「構文エラーだからスキップ」に吸い込まれると、壊れた文書が一覧に混ざる。
+        val lossy = String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+        assertTrue(lossy.contains('\uFFFD'), "前提: 置換経路では U+FFFD になる: $lossy")
+        Json.parseToJsonElement(lossy)
+
+        assertFailsWith<MalformedInputException> { store.loadRun("run-bad-utf8") }
+        assertFailsWith<MalformedInputException> { store.loadRuns() }
+    }
+
+    /**
+     * 孤立サロゲートは保存時に例外にする。`toByteArray(UTF_8)`（旧実装）は `0x3f`（`?`）に
+     * 置き換えるため、壊れた文字列が別の値として黙って残る。`Files.writeString` と同じく
+     * 置換せず [CharacterCodingException]（[IOException] の派生）にすることを確かめる。
+     */
+    @Test
+    fun `孤立サロゲートを含む run は保存できず 0x3f にも置換されない`() {
+        val root = newRoot()
+        val store = newStore(root)
+        val base = sampleRun("run-lone", evalPoint = 100)
+
+        for (broken in listOf("\uD800", "\uDC00")) {
+            val document = base.copy(run = base.run.copy(note = "前${broken}後"))
+
+            assertFailsWith<CharacterCodingException> { store.saveRun(document) }
+
+            // 置換経路なら `?` を含む文書が書かれてしまう。失敗時は target も temp も残さない。
+            assertFalse(Files.exists(runsDir(root).resolve("run-lone.json")))
+            val names = Files.newDirectoryStream(runsDir(root)).use { stream ->
+                stream.map { it.fileName.toString() }.toList()
+            }
+            assertEquals(emptyList(), names, "失敗した保存が temp を残している")
+            assertNull(store.loadRun("run-lone"))
+        }
+    }
+
+    /**
+     * PR #11 で決めた区別を固定する。構文・スキーマ違反の1件はスキップして残りを返し、
+     * I/O 障害（読めないファイル・不正な UTF-8）はスキップせず失敗する。
+     */
+    @Test
+    fun `構文エラーはスキップし不正な UTF-8 は失敗する`() {
+        val root = newRoot()
+        val store = newStore(root)
+        store.saveRun(sampleRun("run-1", evalPoint = 100))
+
+        // 構文エラーだけなら従来どおりスキップして残りを返す。
+        Files.writeString(runsDir(root).resolve("broken.json"), "{ \"run\": ")
+        assertEquals(listOf("run-1"), store.loadRuns().map { it.run.id })
+
+        // 不正な UTF-8 は「壊れた JSON」ではなく I/O 障害として扱う。
+        val bad = runsDir(root).resolve("bad-utf8.json")
+        Files.write(
+            bad,
+            "{\"run\":{\"id\":\"bad-utf8\",\"ranking_id\":\"ranking-1\",\"note\":\"".toByteArray(StandardCharsets.UTF_8) +
+                byteArrayOf(0xC3.toByte(), 0x28) +
+                "\"}}".toByteArray(StandardCharsets.UTF_8),
+        )
+        assertFailsWith<MalformedInputException> { store.loadRuns() }
+        assertTrue(Files.exists(indexFile(root)), "読み込みの失敗だけでは索引を消さない")
+
+        // 索引の再生成は不完全な要約を確定しない（既存の IOException 経路に乗る）。
+        assertFailsWith<MalformedInputException> {
+            store.saveRun(sampleRun("run-2", evalPoint = 200))
+        }
+        assertFalse(Files.exists(indexFile(root)), "再生成に失敗した索引を残さない")
+        assertFailsWith<MalformedInputException> { store.loadIndex() }
     }
 
     @Test

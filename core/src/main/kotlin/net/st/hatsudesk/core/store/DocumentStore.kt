@@ -7,6 +7,9 @@ import net.st.hatsudesk.core.model.CardMaster
 import net.st.hatsudesk.core.model.Run
 import net.st.hatsudesk.core.model.RunDocument
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -56,6 +59,11 @@ internal data class RunsIndex(
  * 全部読む。壊れた1件（構文・スキーマ違反）はスキップして残りを返す（1件の破損で
  * 一覧が消えないため）。読めないファイル（I/O 障害）はスキップせず [IOException] を
  * そのまま投げる。読めなかった run があるのに不完全な索引を正常として確定しないため。
+ *
+ * 文字コードは UTF-8 に固定し、置換文字で黙って通さない。不正なバイト列（例: `c3 28`）
+ * や孤立サロゲートは、置換（U+FFFD / `0x3f`）ではなく [java.nio.charset.CharacterCodingException]
+ * にする。これは [IOException] の派生なので「I/O 障害は失敗」の経路に乗る。符号化の破損を
+ * 構文エラー扱いでスキップすると、壊れた文書を正常な一覧に混ぜてしまうため。
  *
  * **スレッド安全。** 書き込み（run / card の保存）と索引の再生成・読み込みは、単一の
  * [ReentrantLock] で直列化する（設計 §11.5 の Mutex。単一プロセス前提）。これにより
@@ -168,10 +176,12 @@ class DocumentStore(root: Path) {
     /**
      * `file` を読んでデコードする。ファイルが無ければ null、JSON の構文・スキーマ違反も
      * null（1件の破損で他が読めなくならないように）。I/O 障害は握りつぶさず伝播させる。
+     * 不正な UTF-8 は [java.nio.charset.CharacterCodingException]（[IOException] の派生）
+     * として伝播する。構文エラーと同じ null にすると、壊れた文書を黙って一覧から外すだけになる。
      */
     private inline fun <reified T> readOrNull(file: Path): T? {
         val text = try {
-            String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+            decodeUtf8(Files.readAllBytes(file))
         } catch (e: NoSuchFileException) {
             return null
         }
@@ -201,10 +211,10 @@ class DocumentStore(root: Path) {
         try {
             // API 26 の Files には文字列を直接書くメソッドが無い（ADR 0011）。JDK 版の既定と
             // 同じ CREATE + TRUNCATE_EXISTING + WRITE で、createTempFile が作った空ファイルに
-            // 上書きする。
+            // 上書きする。符号化は先に済ませ、失敗したら temp も target も触らない。
             Files.write(
                 temp,
-                content.toByteArray(StandardCharsets.UTF_8),
+                encodeUtf8(content),
                 CREATE,
                 TRUNCATE_EXISTING,
                 WRITE,
@@ -218,6 +228,41 @@ class DocumentStore(root: Path) {
         } finally {
             Files.deleteIfExists(temp)
         }
+    }
+
+    /**
+     * UTF-8 を厳密にデコードする。置換はしない（[CodingErrorAction.REPORT]）。
+     *
+     * `String(bytes, UTF_8)` は不正なバイト列を U+FFFD に置き換えて返すため、
+     * JDK 17 の `Files` にある文字列読み取り版と振る舞いが変わる。JSON の構文エラーに見えてしまい、
+     * 「壊れた文書はスキップ」に吸い込まれる。ここでは [java.nio.charset.CharacterCodingException]
+     * （[IOException] の派生）にして、I/O 障害として失敗させる。
+     *
+     * 使用 API はいずれも android-36 の `api-versions.xml` で `since` 1（[StandardCharsets] は 19）。
+     */
+    private fun decodeUtf8(bytes: ByteArray): String =
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+
+    /**
+     * UTF-8 を厳密にエンコードする。置換はしない（[CodingErrorAction.REPORT]）。
+     *
+     * `String.toByteArray(UTF_8)` は孤立サロゲートを `0x3f`（`?`）に置き換えるため、
+     * JDK 17 の `Files` にある文字列書き込み版と振る舞いが変わる。壊れた文字列が黙って別の値として
+     * 保存されないよう、[java.nio.charset.CharacterCodingException] を投げる。
+     */
+    private fun encodeUtf8(text: String): ByteArray {
+        val encoded = StandardCharsets.UTF_8.newEncoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .encode(CharBuffer.wrap(text))
+        // encode が返すバッファは position が 0、limit が符号化結果の末尾。
+        val bytes = ByteArray(encoded.remaining())
+        encoded.get(bytes)
+        return bytes
     }
 
     private fun requireSafeId(id: String, field: String): String {
