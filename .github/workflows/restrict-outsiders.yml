@@ -1,0 +1,50 @@
+name: restrict-outsiders
+
+# user 所有の public リポジトリでは fork を禁止できず（API 422）、
+# Issue / PR の作成者も設定では制限できない。
+# そのため、コントリビューター以外が立てた Issue と PR を自動で閉じる。
+#
+# pull_request_target は base リポジトリの権限で走る。fork のコードは
+# checkout しない（checkout した時点で任意コード実行になる）。閉じるだけに使う。
+#
+# このファイル自体は main のブランチ保護（PR＋承認必須）で守られる。
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  close-outsider:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.sender.login != github.repository_owner &&
+      github.event.issue.author_association != 'MEMBER' &&
+      github.event.issue.author_association != 'COLLABORATOR' &&
+      github.event.pull_request.author_association != 'MEMBER' &&
+      github.event.pull_request.author_association != 'COLLABORATOR'
+    steps:
+      - name: Close issue
+        if: github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh issue close "$NUM" --repo "$REPO" --reason "not planned" \
+            --comment "このリポジトリの Issue はコントリビューターのみ受け付けています。"
+
+      - name: Close pull request
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr close "$NUM" --repo "$REPO" \
+            --comment "このリポジトリの Pull Request はコントリビューターのみ受け付けています。"
