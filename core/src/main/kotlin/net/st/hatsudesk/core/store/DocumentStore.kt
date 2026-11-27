@@ -234,7 +234,8 @@ class DocumentStore(root: Path) {
      * UTF-8 を厳密にデコードする。置換はしない（[CodingErrorAction.REPORT]）。
      *
      * `String(bytes, UTF_8)` は不正なバイト列を U+FFFD に置き換えて返すため、
-     * JDK 17 の `Files` にある文字列読み取り版と振る舞いが変わる。JSON の構文エラーに見えてしまい、
+     * JDK 17 の `Files` にある文字列読み取り版（置換せず `MalformedInputException`）と
+     * 振る舞いが変わる。JSON の構文エラーに見えてしまい、
      * 「壊れた文書はスキップ」に吸い込まれる。ここでは [java.nio.charset.CharacterCodingException]
      * （[IOException] の派生）にして、I/O 障害として失敗させる。
      *
@@ -251,8 +252,10 @@ class DocumentStore(root: Path) {
      * UTF-8 を厳密にエンコードする。置換はしない（[CodingErrorAction.REPORT]）。
      *
      * `String.toByteArray(UTF_8)` は孤立サロゲートを `0x3f`（`?`）に置き換えるため、
-     * JDK 17 の `Files` にある文字列書き込み版と振る舞いが変わる。壊れた文字列が黙って別の値として
-     * 保存されないよう、[java.nio.charset.CharacterCodingException] を投げる。
+     * JDK 17 の `Files` にある文字列書き込み版と振る舞いが変わる。あちらは置換せず
+     * `UnmappableCharacterException` を投げ、こちらは同じ入力に `MalformedInputException`
+     * を投げる（どちらも `CharacterCodingException` = [IOException] の派生で、置換はしない）。
+     * 壊れた文字列が黙って別の値として保存されないよう、例外にする。
      */
     private fun encodeUtf8(text: String): ByteArray {
         val encoded = StandardCharsets.UTF_8.newEncoder()

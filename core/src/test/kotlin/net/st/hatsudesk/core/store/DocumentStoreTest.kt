@@ -414,6 +414,8 @@ class DocumentStoreTest {
      * 孤立サロゲートは保存時に例外にする。`toByteArray(UTF_8)`（旧実装）は `0x3f`（`?`）に
      * 置き換えるため、壊れた文字列が別の値として黙って残る。`Files.writeString` と同じく
      * 置換せず [CharacterCodingException]（[IOException] の派生）にすることを確かめる。
+     * 型はこの JDK 17 では `MalformedInputException`（`writeString` は
+     * `UnmappableCharacterException`）になる。
      */
     @Test
     fun `孤立サロゲートを含む run は保存できず 0x3f にも置換されない`() {
