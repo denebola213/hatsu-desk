@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3
 """GitHub App の installation token を発行し、その資格でコマンドを実行する。
 
 使い方:
