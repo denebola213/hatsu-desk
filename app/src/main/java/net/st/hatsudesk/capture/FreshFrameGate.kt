@@ -8,27 +8,36 @@ package net.st.hatsudesk.capture
  * **隠した後に届いたフレーム**を待つこと。固定の待ち時間にしないのは、待つべきなのが
  * 時間ではなくフレームの到着だから（短ければ数十 ms で済み、遅い端末でも取りこぼさない）。
  *
- * 通し番号は [LatestFrameBuffer] に届いた順で、フレームが1枚増えるごとに +1。
+ * 通し番号は [FrameStore] に届いた順で、フレームが1枚増えるごとに +1。
+ *
+ * 判定は必ず**差分**で行う。`baseline + required` で比べると、通し番号が Long の上限に
+ * 近いときに負数へ回り込み、新しいフレームが1枚も来なくても「届いた」と答えてしまう。
  */
 class FreshFrameGate(private val required: Int = REQUIRED_FRAMES) {
 
-    /** 隠す直前の通し番号。まだ [after] を呼んでいなければ [Long.MAX_VALUE]。 */
-    private var baseline: Long = Long.MAX_VALUE
+    /** 隠す直前の通し番号。まだ [after] を呼んでいなければ null。 */
+    private var baseline: Long? = null
 
-    /** 隠す直前の通し番号を受け取り、待つべき番号を返す。 */
-    fun after(serial: Long): Long {
+    /** 隠す直前の通し番号を覚える。待つべき枚数は [isReady] が差分で決める。 */
+    fun after(serial: Long) {
         baseline = serial
-        return serial + required
     }
 
     /** 隠した後のフレームが [required] 枚以上届いたか。 */
-    fun isReady(serial: Long): Boolean = serial >= baseline + required
+    fun isReady(serial: Long): Boolean = arrived(serial) >= required
 
     /**
-     * 隠した後に1枚でも届いたか。2枚待てなかったときの緩い条件で、
-     * false なら手元のフレームはボタンが写ったまま（＝保存してはいけない）。
+     * 隠した後に1枚でも届いたか。**保存の条件には使わない。** 1枚だけでは、それが
+     * 隠す前に生成されてキューに残っていたボタン入りのフレームである可能性を
+     * 排除できない（[isReady] の「2枚」がそのための条件）。
      */
-    fun hasAnyNewFrame(serial: Long): Boolean = serial > baseline
+    fun hasAnyNewFrame(serial: Long): Boolean = arrived(serial) > 0
+
+    /** [after] してから届いた枚数。まだ [after] していなければ「来ていない」に倒す。 */
+    private fun arrived(serial: Long): Long {
+        val from = baseline ?: return -1
+        return serial - from
+    }
 
     companion object {
         /** 隠した後、合成が追いついたと見なす枚数。 */

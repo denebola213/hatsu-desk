@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -50,8 +51,43 @@ class CaptureOverlayButton(
     private val button = ButtonView(appContext)
 
     private var params: WindowManager.LayoutParams? = null
-    private var attached = false
     private var screen = ScreenSize(0, 0)
+
+    /**
+     * 出し入れの段取り。**失敗しても View を残さない**（`addView` の後に listener の
+     * 登録が失敗する経路があるため）。成否はここだけで決める。
+     */
+    private val attachment = OverlayAttachment(
+        object : OverlayAttachment.Window {
+            override fun addView() {
+                params?.let { windowManager.addView(button, it) } ?: throw IllegalStateException("レイアウトが無い")
+            }
+
+            override fun register() {
+                displayManager.registerDisplayListener(displayListener, mainHandler)
+            }
+
+            override fun unregister() {
+                runCatching { displayManager.unregisterDisplayListener(displayListener) }
+                    .onFailure { Log.w(LOG_TAG, "画面の変化の追従を止められませんでした", it) }
+            }
+
+            override fun removeView(): Boolean {
+                // 外れているかを例外ではなく View の親で確かめる。二重に外しても安全。
+                if (!isOnScreen()) return true
+                return try {
+                    windowManager.removeViewImmediate(button)
+                    true
+                } catch (error: Throwable) {
+                    Log.e(LOG_TAG, "取得ボタンを外せませんでした", error)
+                    // 例外が出ても、実際に外れていれば成功として扱う。
+                    !isOnScreen()
+                } finally {
+                    params = null
+                }
+            }
+        },
+    )
     private var position = OverlayPosition(0, 0)
 
     /** 一度でも位置を決めたか。取得のたびに隠しても位置を忘れない。 */
@@ -75,7 +111,7 @@ class CaptureOverlayButton(
      * 例外は投げない（投影そのものは続けられる）。
      */
     fun show(): Boolean {
-        if (attached) return true
+        if (attachment.isAttached) return true
         if (!Settings.canDrawOverlays(appContext)) return false
         val next = currentScreen()
         if (!placed) {
@@ -97,7 +133,7 @@ class CaptureOverlayButton(
             )
         }
         screen = next
-        val layout = WindowManager.LayoutParams(
+        params = WindowManager.LayoutParams(
             sizePx,
             sizePx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -110,27 +146,23 @@ class CaptureOverlayButton(
             x = position.x
             y = position.y
         }
-        return try {
-            windowManager.addView(button, layout)
-            params = layout
-            attached = true
-            displayManager.registerDisplayListener(displayListener, mainHandler)
-            true
-        } catch (error: Throwable) {
+        val shown = attachment.attach()
+        if (!shown) {
             // 権限が実行中に取り消された場合もここに来る。投影は止めない。
-            android.util.Log.w(LOG_TAG, "取得ボタンを出せませんでした", error)
-            false
+            Log.w(LOG_TAG, "取得ボタンを出せませんでした")
+            params = null
         }
+        return shown
     }
 
-    /** 隠す。何度呼んでも安全。投影の停止・失効では必ずここを通る。 */
-    fun hide() {
-        if (!attached) return
-        attached = false
-        runCatching { displayManager.unregisterDisplayListener(displayListener) }
-        params = null
-        runCatching { windowManager.removeViewImmediate(button) }
-    }
+    /**
+     * 隠す。**外れたかを返す。** 外れていなければ呼出側は保存を中止する
+     * （ボタンが写った1枚を残さない）。何度呼んでも安全。
+     */
+    fun hide(): Boolean = attachment.detach()
+
+    /** 実際に画面に載っているか。状態の取り違えで「外したつもり」にならないよう見る。 */
+    private fun isOnScreen(): Boolean = button.parent != null || button.isAttachedToWindow
 
     /**
      * 画面の大きさが変わった。ボタンが画面の外に残らないよう、位置を移し直す。
@@ -153,7 +185,7 @@ class CaptureOverlayButton(
     }
 
     private fun applyLayout() {
-        if (!attached) return
+        if (!attachment.isAttached) return
         val layout = params ?: return
         layout.x = position.x
         layout.y = position.y

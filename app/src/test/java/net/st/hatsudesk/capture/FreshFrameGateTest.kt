@@ -53,4 +53,55 @@ class FreshFrameGateTest {
         gate.after(0)
         assertTrue(gate.isReady(1))
     }
+
+    @Test
+    fun `まだ隠していない番号では撮らない`() {
+        // baseline 未設定。0 は「新しいフレームが来ていない」ので撮ってはいけない。
+        val gate = FreshFrameGate()
+        assertFalse(gate.isReady(0))
+        assertFalse(gate.hasAnyNewFrame(0))
+    }
+
+    @Test
+    fun `上限付近でも新しいフレームが無ければ撮らない`() {
+        // baseline + required が Long の上限を越えて負数に回り込むと、新規フレームが
+        // 無くても isReady が true になっていた（PR #22 の指摘 4）。
+        val gate = FreshFrameGate()
+        gate.after(Long.MAX_VALUE - 1)
+        // 1枚しか進んでいない。上限を越える足し算で判定すると true になっていた。
+        assertFalse(gate.isReady(Long.MAX_VALUE))
+        assertTrue(gate.hasAnyNewFrame(Long.MAX_VALUE))
+        assertFalse(gate.hasAnyNewFrame(Long.MAX_VALUE - 1))
+    }
+
+    @Test
+    fun `上限ちょうどから数えても桁あふれしない`() {
+        val gate = FreshFrameGate()
+        gate.after(Long.MAX_VALUE)
+        assertFalse(gate.isReady(Long.MAX_VALUE))
+        assertFalse(gate.hasAnyNewFrame(Long.MAX_VALUE))
+        // 通し番号が回り込んだ（負になった）側でも、差分は「1枚」「2枚」と数えられる。
+        assertFalse(gate.isReady(Long.MIN_VALUE))
+        assertTrue(gate.hasAnyNewFrame(Long.MIN_VALUE))
+        assertTrue(gate.isReady(Long.MIN_VALUE + 1))
+    }
+
+    @Test
+    fun `回り込んで2枚進めば撮ってよい`() {
+        val gate = FreshFrameGate()
+        gate.after(Long.MAX_VALUE - 1)
+        // MAX-1 → MAX → MIN と進んだ。足し算で判定すると負数に回り込む位置。
+        assertFalse(gate.isReady(Long.MAX_VALUE))
+        assertTrue(gate.isReady(Long.MIN_VALUE))
+    }
+
+    @Test
+    fun `下限付近でも新しいフレームが無ければ撮らない`() {
+        val gate = FreshFrameGate()
+        gate.after(Long.MIN_VALUE)
+        assertFalse(gate.isReady(Long.MIN_VALUE))
+        assertFalse(gate.hasAnyNewFrame(Long.MIN_VALUE))
+        assertFalse(gate.isReady(Long.MIN_VALUE + 1))
+        assertTrue(gate.isReady(Long.MIN_VALUE + 2))
+    }
 }
