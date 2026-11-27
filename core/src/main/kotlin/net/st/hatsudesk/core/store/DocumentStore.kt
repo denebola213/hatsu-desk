@@ -7,11 +7,15 @@ import net.st.hatsudesk.core.model.CardMaster
 import net.st.hatsudesk.core.model.Run
 import net.st.hatsudesk.core.model.RunDocument
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
+import java.nio.file.StandardOpenOption.WRITE
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -167,7 +171,7 @@ class DocumentStore(root: Path) {
      */
     private inline fun <reified T> readOrNull(file: Path): T? {
         val text = try {
-            Files.readString(file)
+            String(Files.readAllBytes(file), StandardCharsets.UTF_8)
         } catch (e: NoSuchFileException) {
             return null
         }
@@ -195,7 +199,16 @@ class DocumentStore(root: Path) {
         Files.createDirectories(target.parent)
         val temp = Files.createTempFile(target.parent, ".${target.fileName}.", ".tmp")
         try {
-            Files.writeString(temp, content)
+            // API 26 の Files には文字列を直接書くメソッドが無い（ADR 0011）。JDK 版の既定と
+            // 同じ CREATE + TRUNCATE_EXISTING + WRITE で、createTempFile が作った空ファイルに
+            // 上書きする。
+            Files.write(
+                temp,
+                content.toByteArray(StandardCharsets.UTF_8),
+                CREATE,
+                TRUNCATE_EXISTING,
+                WRITE,
+            )
             try {
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             } catch (e: AtomicMoveNotSupportedException) {
