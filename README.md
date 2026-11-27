@@ -50,3 +50,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```bash
 scripts/check-no-internet.sh --merged   # 通信権限の混入を落とす
 ```
+
+## 検証端末
+
+| 項目 | 値 |
+| --- | --- |
+| 機種 | Google Pixel 10 Pro（blazer） |
+| Android | API 37（17） |
+| 画面 | 1080x2410 |
+| 接続 | ワイヤレスデバッグ常時 ON、`adb connect 192.168.20.223:<接続ポート>` |
+
+接続ポートは再起動で変わる。ペアリングは端末ごとに1回だけ（鍵は `~/.android/adbkey`）。`adb pair` のペア用ポートと `adb connect` の接続用ポートは別物。
