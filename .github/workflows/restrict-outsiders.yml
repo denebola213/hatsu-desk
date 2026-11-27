@@ -23,6 +23,7 @@ jobs:
   close-outsider:
     runs-on: ubuntu-latest
     if: >-
+      github.event.sender.type != 'Bot' &&
       github.event.sender.login != github.repository_owner &&
       github.event.issue.author_association != 'MEMBER' &&
       github.event.issue.author_association != 'COLLABORATOR' &&
