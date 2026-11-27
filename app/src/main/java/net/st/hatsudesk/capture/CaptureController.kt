@@ -595,6 +595,13 @@ object CaptureController {
 
     @Synchronized
     private fun handleSystemStop() {
+        // このコールバックは投影用の HandlerThread で走る。停止の片付けは WindowManager を
+        // 触る（ボタンを外す）ので、main へ渡してから行う。
+        scope.launch { onStoppedBySystem() }
+    }
+
+    @Synchronized
+    private fun onStoppedBySystem() {
         // 停止済みでも、前回外せなかったボタンはここで試し直す（StopSequence）。
         if (!stopSequence.stop()) return
         message = "OS 側で投影が終了しました"
