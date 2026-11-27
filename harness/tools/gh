@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
-dir="$(cd "$(dirname "$0")" && pwd)"
+#!/bin/sh
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
 . "${HERMES_HOME:-/home/hermeswebui/.hermes}/secrets/gh-app.env"
 export GH_APP_ID GH_APP_INSTALLATION_ID
-exec "$dir/gh-app-token.py" -- gh "$@"
+exec /usr/local/bin/python3 "$dir/gh-app-token.py" -- gh "$@"
