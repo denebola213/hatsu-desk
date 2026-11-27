@@ -84,10 +84,20 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 print("allowlist:", len(data["approvals"]), "entries")
 PY
 
-# 5) git の pre-push（リポジトリ内のフックを git 自身に呼ばせる）
-chmod +x "$HARNESS/githooks/pre-push"
-git -C "$REPO" config core.hooksPath "$HARNESS/githooks"
+# 5) git の pre-push と credential helper
+#    リポジトリの外に実体を置く。ブランチを切り替えるとリポジトリ内のパスは
+#    消えることがあり、その状態で push すると資格の取得ごと壊れるため。
+BIN="$HERMES_HOME/bin"
+GHK="$HERMES_HOME/githooks"
+mkdir -p "$BIN" "$GHK"
+cp "$HARNESS/tools/git-credential-app.sh" "$HARNESS/tools/gh-app-token.py" "$HARNESS/tools/gh" "$BIN/"
+cp "$HARNESS/githooks/pre-push" "$GHK/"
+chmod +x "$BIN"/* "$GHK"/*
+git -C "$REPO" config core.hooksPath "$GHK"
+git -C "$REPO" config --unset-all credential.helper 2>/dev/null || true
+git -C "$REPO" config --add credential.helper "$BIN/git-credential-app.sh"
 echo "core.hooksPath=$(git -C "$REPO" config core.hooksPath)"
+echo "credential.helper=$(git -C "$REPO" config --get-all credential.helper | tr '\n' ' ')"
 
 echo "== verify =="
 HERMES_BIN="$(command -v hermes || echo /app/venv/bin/hermes)"
