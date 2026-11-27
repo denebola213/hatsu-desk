@@ -86,6 +86,17 @@ object CaptureController {
     /** 連打しても保存が重ならないようにする。押した回数だけ順に書く。 */
     private val saveMutex = Mutex()
 
+    /**
+     * 保存済みの枚数の読み直し。結果は [applySavedCount] でだけ反映する。
+     * 読み直しと保存の反映は同じ世代番号で順序が決まり、古い一覧が後から勝たない。
+     */
+    private val savedCountRefresh = SavedCountRefresher(
+        scope = scope,
+        read = { captureStore().list().size },
+        apply = { count -> applySavedCount(count) },
+        onError = { Log.e(LOG_TAG, "保存済みの枚数を読めませんでした", it) },
+    )
+
     private val _state = MutableStateFlow(CaptureState())
     val state: StateFlow<CaptureState> = _state.asStateFlow()
 
@@ -122,7 +133,7 @@ object CaptureController {
         appContext = context.applicationContext
         if (countsLoaded) return
         countsLoaded = true
-        scope.launch { reloadSavedCount() }
+        savedCountRefresh.refresh()
     }
 
     /**
@@ -131,27 +142,21 @@ object CaptureController {
      * 起動時の一度きりだと、外部（adb・ファイルマネージャ）でファイルが消えたときに
      * 「保存した枚数」が実際とずれる。数えるのは表示のためだけなので、失敗しても
      * 前回の値のままにする。まだ [attach] されていなければ何もしない。
+     *
+     * 読み直しは並走し得る（連続した ON_RESUME）。反映するのは自分より新しい要求が
+     * 始まっていない場合だけで、古い一覧が後から枚数を戻すことはない。
      */
     @Synchronized
     fun refreshSavedCount() {
         if (appContext == null) return
-        scope.launch { reloadSavedCount() }
+        savedCountRefresh.refresh()
     }
 
-    /** 実際のファイル数で [savedCount] を置き換える。読めなければ何もしない。 */
-    private suspend fun reloadSavedCount() {
-        val files = try {
-            withContext(Dispatchers.IO) { captureStore().list() }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            Log.e(LOG_TAG, "保存済みの枚数を読めませんでした", error)
-            return
-        }
-        synchronized(this) {
-            savedCount = files.size
-            publish()
-        }
+    /** 読み直した枚数を反映する。古い結果は [SavedCountRefresher] が捨てる。 */
+    @Synchronized
+    private fun applySavedCount(count: Int) {
+        savedCount = count
+        publish()
     }
 
     /**
@@ -371,7 +376,7 @@ object CaptureController {
             setMessage("フレームがありません")
             return
         }
-        val file = try {
+        val saved = try {
             withContext(Dispatchers.IO) {
                 // 最新1枚を写し取る。バッファからは消さない（静止画でも何度でも保存できる）。
                 val snapshot = frames.withLatest { image -> image.copyToBitmap() }
@@ -380,8 +385,11 @@ object CaptureController {
                 } else {
                     try {
                         val store = captureStore()
-                        val name = uniqueName(store.list().map { it.name }.toSet())
-                        store.save(name, compressPng(snapshot))
+                        // 書き込み前の一覧で名前を決め、保存後の実数も同じ一覧から出す。
+                        // 加算にすると、このファイルを数えた読み直しと二重に数えてしまう。
+                        val existing = store.list()
+                        val name = uniqueName(existing.map { it.name }.toSet())
+                        store.save(name, compressPng(snapshot)) to (existing.size + 1)
                     } finally {
                         snapshot.recycle()
                     }
@@ -395,17 +403,18 @@ object CaptureController {
             return
         }
 
-        if (file == null) {
+        if (saved == null) {
             setMessage("フレームがまだ届いていません")
             return
         }
+        val (file, total) = saved
 
         // 投影が止まった後に書き終わった場合でも、枚数とファイル名は出す。
         synchronized(this) {
-            savedCount += 1
             lastCapture = "${file.name}（${formatSize(file.sizeBytes)}）"
             message = "1枚保存しました"
-            publish()
+            // 保存の反映も読み直しと同じ世代で順序を決める（古い一覧に巻き戻されない）。
+            savedCountRefresh.record(total)
         }
     }
 
