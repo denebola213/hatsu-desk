@@ -75,7 +75,7 @@ private fun RunDetailBody(detail: RunDetailData) {
     ) {
         SectionTitle("記録")
         Field("日付", run.playedOn ?: "不明")
-        Field("ランキング", run.rankingId)
+        Field("ランキング", run.rankingId.ifBlank { "不明" })
         Field("順位", run.rank?.let { "${formatNumber(it)}位" } ?: "不明")
         Field("評価点", run.evalPoint?.let { "${formatNumber(it)}点" } ?: "不明")
         Field("パラメータ合計", formatNumber(run.paramTotal))

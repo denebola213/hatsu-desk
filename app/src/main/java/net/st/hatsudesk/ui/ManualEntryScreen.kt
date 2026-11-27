@@ -26,9 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import net.st.hatsudesk.core.model.Run
-import net.st.hatsudesk.core.model.RunDocument
-import net.st.hatsudesk.core.model.RunIdol
 import net.st.hatsudesk.data.RunRepository
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -38,8 +35,10 @@ import java.util.UUID
 /**
  * 手入力。run を1件作って保存する（設計 §8.6）。
  *
- * 必須は日付・ランキング・順位・評価点だけ。ほかは空欄でよく、空欄は null（「不明」）で
- * 保存する。保存に成功したら一覧へ戻る。
+ * **全項目が任意。** 空欄・空白のみは null（「不明」）として保存し、0 は 0 として残す。
+ * 数値欄に読めない文字列が入ったときだけ、その欄に日本語のエラーを出して保存を止める
+ * （他が埋まっていても、打ち間違いを黙って「不明」に落とさないため）。
+ * 保存に成功したら一覧へ戻る。
  */
 @Composable
 fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: () -> Unit) {
@@ -54,53 +53,24 @@ fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: ()
     var note by rememberSaveable { mutableStateOf("") }
 
     var saving by remember { mutableStateOf(false) }
-    var problems by remember { mutableStateOf<List<String>>(emptyList()) }
+    var problems by remember { mutableStateOf<List<ManualEntryProblem>>(emptyList()) }
     var saveFailure by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun parse(): Pair<RunDocument?, List<String>> {
-        val found = mutableListOf<String>()
-        val date = runCatching { LocalDate.parse(playedOn.trim()) }.getOrNull()
-        if (date == null) found += "日付を 2026-11-27 の形で入れてください。"
-        if (rankingId.isBlank()) found += "ランキングを入れてください。"
+    fun input() = ManualEntryInput(
+        playedOn = playedOn,
+        rankingId = rankingId,
+        rank = rank,
+        evalPoint = evalPoint,
+        paramTotal = paramTotal,
+        plv = plv,
+        grade = grade,
+        idolCardId = idolCardId,
+        note = note,
+    )
 
-        val rankValue = rank.trim().toIntOrNull()
-        if (rankValue == null || rankValue <= 0) found += "順位は1以上の整数で入れてください。"
-
-        val pointValue = evalPoint.trim().toIntOrNull()
-        if (pointValue == null || pointValue < 0) found += "評価点は0以上の整数で入れてください。"
-
-        val paramValue = paramTotal.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
-        if (paramTotal.isNotBlank() && (paramValue == null || paramValue < 0)) {
-            found += "パラメータ合計は0以上の整数で入れてください。"
-        }
-
-        val plvValue = plv.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
-        if (plv.isNotBlank() && (plvValue == null || plvValue < 0)) {
-            found += "PLv は0以上の整数で入れてください。"
-        }
-
-        if (found.isNotEmpty()) return null to found
-
-        val id = newRunId()
-        val document = RunDocument(
-            run = Run(
-                id = id,
-                rankingId = rankingId.trim(),
-                rank = rankValue,
-                plv = plvValue,
-                grade = grade.trim().takeIf { it.isNotEmpty() },
-                evalPoint = pointValue,
-                paramTotal = paramValue,
-                playedOn = playedOn.trim(),
-                note = note.trim().takeIf { it.isNotEmpty() },
-            ),
-            idol = idolCardId.trim().takeIf { it.isNotEmpty() }?.let { cardId ->
-                RunIdol(runId = id, cardId = cardId)
-            },
-        )
-        return document to emptyList()
-    }
+    fun problemOf(field: ManualEntryField): String? =
+        problems.firstOrNull { it.field == field }?.message
 
     ScreenFrame(title = "手入力", onBack = onBack) {
         Column(
@@ -110,16 +80,13 @@ fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: ()
                 .padding(16.dp),
         ) {
             Text(
-                "日付・ランキング・順位・評価点だけが必須です。空欄は「不明」として保存します。",
+                "すべて任意です。空欄は「不明」として保存します。",
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(12.dp))
 
             if (problems.isNotEmpty()) {
                 Text("入力に誤りがあります", style = MaterialTheme.typography.titleSmall)
-                problems.forEach { problem ->
-                    Text("・$problem", style = MaterialTheme.typography.bodySmall)
-                }
                 Spacer(Modifier.height(12.dp))
             }
 
@@ -129,76 +96,59 @@ fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: ()
                 Spacer(Modifier.height(12.dp))
             }
 
-            OutlinedTextField(
+            EntryField(
                 value = playedOn,
                 onValueChange = { playedOn = it },
-                label = { Text("日付（必須）") },
-                supportingText = { Text("年-月-日。例: 2026-11-27") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "日付",
+                problem = problemOf(ManualEntryField.PLAYED_ON),
+                supporting = "年-月-日。例: 2026-11-27",
             )
-            OutlinedTextField(
+            EntryField(
                 value = rankingId,
                 onValueChange = { rankingId = it },
-                label = { Text("ランキング（必須）") },
-                supportingText = { Text("公演・シーズン・難易度・Pアイドルをまとめた識別子") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "ランキング",
+                supporting = "公演・シーズン・難易度・Pアイドルをまとめた識別子",
             )
-            OutlinedTextField(
+            EntryField(
                 value = rank,
                 onValueChange = { rank = it },
-                label = { Text("順位（必須）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "順位",
+                problem = problemOf(ManualEntryField.RANK),
             )
-            OutlinedTextField(
+            EntryField(
                 value = evalPoint,
                 onValueChange = { evalPoint = it },
-                label = { Text("評価点（必須）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "評価点",
+                problem = problemOf(ManualEntryField.EVAL_POINT),
             )
-
-            Spacer(Modifier.height(12.dp))
-            Text("任意（空欄は「不明」）", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(4.dp))
-
-            OutlinedTextField(
+            EntryField(
                 value = paramTotal,
                 onValueChange = { paramTotal = it },
-                label = { Text("パラメータ合計") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "パラメータ合計",
+                problem = problemOf(ManualEntryField.PARAM_TOTAL),
             )
-            OutlinedTextField(
+            EntryField(
                 value = plv,
                 onValueChange = { plv = it },
-                label = { Text("PLv") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "PLv",
+                problem = problemOf(ManualEntryField.PLV),
             )
-            OutlinedTextField(
+            EntryField(
                 value = grade,
                 onValueChange = { grade = it },
-                label = { Text("グレード") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "グレード",
             )
-            OutlinedTextField(
+            EntryField(
                 value = idolCardId,
                 onValueChange = { idolCardId = it },
-                label = { Text("Pアイドルのカード番号") },
-                supportingText = { Text("辞書に無い番号でも保存できます。詳細では「未詳」と出ます。") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                label = "Pアイドルのカード番号",
+                supporting = "辞書に無い番号でも保存できます。詳細では「未詳」と出ます。",
             )
-            OutlinedTextField(
+            EntryField(
                 value = note,
                 onValueChange = { note = it },
-                label = { Text("メモ") },
+                label = "メモ",
                 minLines = 3,
-                modifier = Modifier.fillMaxWidth(),
             )
 
             Spacer(Modifier.height(20.dp))
@@ -206,9 +156,10 @@ fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: ()
                 Button(
                     enabled = !saving,
                     onClick = {
-                        val (document, found) = parse()
-                        problems = found
+                        val parsed = parseManualEntry(input(), newRunId())
+                        problems = parsed.problems
                         saveFailure = null
+                        val document = parsed.document
                         if (document != null) {
                             scope.launch {
                                 saving = true
@@ -234,6 +185,32 @@ fun ManualEntryScreen(repository: RunRepository, onBack: () -> Unit, onSaved: ()
             Spacer(Modifier.height(32.dp))
         }
     }
+}
+
+/**
+ * 1行の入力欄。エラーがあるときだけ、その欄の下に日本語のメッセージを出す。
+ * 空欄を許す欄には「（必須）」を付けない。
+ */
+@Composable
+private fun EntryField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    problem: String? = null,
+    supporting: String? = null,
+    minLines: Int = 1,
+) {
+    val note = problem ?: supporting
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        isError = problem != null,
+        supportingText = if (note == null) null else ({ Text(note) }),
+        singleLine = minLines == 1,
+        minLines = minLines,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 private fun newRunId(): String {

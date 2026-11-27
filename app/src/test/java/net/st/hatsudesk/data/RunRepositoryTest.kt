@@ -4,9 +4,12 @@ import kotlinx.coroutines.runBlocking
 import net.st.hatsudesk.core.model.Run
 import net.st.hatsudesk.core.model.RunDocument
 import net.st.hatsudesk.core.model.RunIdol
+import net.st.hatsudesk.ui.ManualEntryInput
+import net.st.hatsudesk.ui.parseManualEntry
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -79,5 +82,31 @@ class RunRepositoryTest {
         val dictionary = repository.loadDictionary()
         assertEquals(emptyList<String>(), dictionary.cards.map { it.cardId })
         assertEquals(listOf("idol-unknown"), dictionary.unknownCardIds)
+    }
+
+    /** すべて空欄の手入力を保存し、別インスタンスから「不明」のまま読めること（設計 §8.6）。 */
+    @Test
+    fun runWithEveryFieldUnknownRoundTrips() = runBlocking {
+        val parsed = parseManualEntry(ManualEntryInput(), runId = "run-blank")
+        RunRepository(root.toFile()).save(parsed.document!!)
+
+        val reopened = RunRepository(root.toFile())
+        val entry = reopened.loadOverview().entries.single()
+        assertEquals("run-blank", entry.runId)
+        assertEquals("", entry.rankingId)
+        assertNull(entry.rank)
+        assertNull(entry.evalPoint)
+        assertNull(entry.paramTotal)
+        assertNull(entry.idolCardId)
+
+        val run = reopened.loadDetail("run-blank")!!.document.run
+        assertEquals("", run.rankingId)
+        assertNull(run.playedOn)
+        assertNull(run.rank)
+        assertNull(run.evalPoint)
+        assertNull(run.paramTotal)
+        assertNull(run.plv)
+        assertNull(run.grade)
+        assertNull(run.note)
     }
 }

@@ -1,5 +1,6 @@
 package net.st.hatsudesk.ui
 
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,7 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import net.st.hatsudesk.core.model.CardMaster
-import java.io.IOException
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 
@@ -46,13 +46,18 @@ suspend fun <T> loadCatching(block: suspend () -> T): LoadState<T> =
         LoadState.Failed(describeFailure(error))
     }
 
-/** 例外を利用者向けの日本語にする。型名とメッセージは調査用に残す。 */
-fun describeFailure(error: Throwable): String = when (error) {
-    is IOException ->
-        "保存領域の読み書きに失敗しました。${error.javaClass.simpleName}: ${error.message ?: "詳細なし"}"
-    else ->
-        "予期しない失敗です。${error.javaClass.simpleName}: ${error.message ?: "詳細なし"}"
+/**
+ * 例外を利用者向けの日本語にする。
+ *
+ * **画面に出すのは日本語だけ。** 例外型名と生の `message`（OS 由来は英語が多い）は
+ * 画面に混ぜず、`android.util.Log` に残す（`logcat` で追う）。
+ */
+fun describeFailure(error: Throwable): String {
+    Log.e(LOG_TAG, "処理に失敗しました: ${error.javaClass.name}: ${error.message}", error)
+    return userMessageFor(error)
 }
+
+private const val LOG_TAG = "hatsudesk"
 
 fun formatNumber(value: Int?): String =
     if (value == null) "不明" else String.format(Locale.JAPAN, "%,d", value)

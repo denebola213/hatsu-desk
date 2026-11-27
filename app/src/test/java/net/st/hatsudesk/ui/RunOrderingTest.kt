@@ -26,7 +26,7 @@ class RunOrderingTest {
                 entry("run-unknown", evalPoint = null),
                 entry("run-high", evalPoint = 300),
             ),
-        ).single().second
+        ).single().runs
 
         assertEquals(listOf("run-high", "run-low", "run-unknown"), ordered.map { it.runId })
     }
@@ -38,7 +38,7 @@ class RunOrderingTest {
                 entry("run-b", rank = 5, evalPoint = 200),
                 entry("run-a", rank = 2, evalPoint = 200),
             ),
-        ).single().second
+        ).single().runs
 
         assertEquals(listOf("run-a", "run-b"), ordered.map { it.runId })
     }
@@ -53,7 +53,35 @@ class RunOrderingTest {
             ),
         )
 
-        assertEquals(listOf("ranking-a", "ranking-b"), ordered.map { it.first })
-        assertEquals(listOf("run-a1", "run-a2"), ordered.first().second.map { it.runId })
+        assertEquals(listOf("ranking-a", "ranking-b"), ordered.map { it.rankingId })
+        assertEquals(listOf("run-a1", "run-a2"), ordered.first().runs.map { it.runId })
+    }
+
+    @Test
+    fun unknownRankingIsOneGroupAtTheEndEvenWithTheHighestEvalPoint() {
+        val ordered = orderRunsForList(
+            listOf(
+                entry("run-unknown-high", rankingId = "", evalPoint = 9999),
+                entry("run-known", rankingId = "ranking-a", evalPoint = 100),
+            ),
+        )
+
+        assertEquals(listOf("ranking-a", null), ordered.map { it.rankingId })
+        assertEquals(listOf("run-unknown-high"), ordered.last().runs.map { it.runId })
+    }
+
+    @Test
+    fun blankAndWhitespaceRankingAreGroupedAsUnknown() {
+        val ordered = orderRunsForList(
+            listOf(
+                entry("run-blank", rankingId = "", evalPoint = 10),
+                entry("run-spaces", rankingId = "   ", evalPoint = 20),
+                entry("run-known", rankingId = "ranking-a", evalPoint = 30),
+            ),
+        )
+
+        assertEquals(listOf("ranking-a", null), ordered.map { it.rankingId })
+        // 不明グループの中でも評価点の降順は保つ。
+        assertEquals(listOf("run-spaces", "run-blank"), ordered.last().runs.map { it.runId })
     }
 }

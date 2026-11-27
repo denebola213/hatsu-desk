@@ -80,15 +80,19 @@ private fun RunListBody(overview: RunOverview, onOpenRun: (String) -> Unit) {
     val groups = orderRunsForList(overview.entries)
 
     LazyColumn(Modifier.fillMaxSize()) {
-        groups.forEach { (rankingId, runs) ->
-            item(key = "ranking-$rankingId") {
+        groups.forEach { group ->
+            val rankingId = group.rankingId
+            item(key = "ranking-${rankingId ?: "unknown"}") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    Text("ランキング $rankingId", style = MaterialTheme.typography.labelLarge)
-                    Text("${runs.size}件", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "ランキング ${rankingId ?: "不明"}",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    Text("${group.runs.size}件", style = MaterialTheme.typography.bodySmall)
                 }
                 HorizontalDivider()
             }
-            items(items = runs, key = { it.runId }) { entry ->
+            items(items = group.runs, key = { it.runId }) { entry ->
                 RunRow(entry, overview, onClick = { onOpenRun(entry.runId) })
                 HorizontalDivider()
             }
