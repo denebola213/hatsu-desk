@@ -39,6 +39,7 @@ fun RunListScreen(
     onOpenRun: (String) -> Unit,
     onManualEntry: () -> Unit,
     onDictionary: () -> Unit,
+    onProjection: () -> Unit,
 ) {
     var state by remember { mutableStateOf<LoadState<RunOverview>>(LoadState.Loading) }
     var attempt by remember { mutableIntStateOf(0) }
@@ -51,6 +52,7 @@ fun RunListScreen(
     ScreenFrame(
         title = "一覧",
         actions = {
+            TextButton(onClick = onProjection) { Text("投影") }
             TextButton(onClick = onManualEntry) { Text("手入力") }
             TextButton(onClick = onDictionary) { Text("カード辞書") }
         },

@@ -19,7 +19,6 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
 import java.nio.file.StandardOpenOption.WRITE
-import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /** `index/runs.idx` の1行。起動時に全部を読み直さずに一覧を出すための要約。 */
@@ -65,8 +64,9 @@ internal data class RunsIndex(
  * にする。これは [IOException] の派生なので「I/O 障害は失敗」の経路に乗る。符号化の破損を
  * 構文エラー扱いでスキップすると、壊れた文書を正常な一覧に混ぜてしまうため。
  *
- * **スレッド安全。** 書き込み（run / card の保存）と索引の再生成・読み込みは、単一の
- * [ReentrantLock] で直列化する（設計 §11.5 の Mutex。単一プロセス前提）。これにより
+ * **スレッド安全。** 書き込み（run / card の保存）と索引の再生成・読み込みは、ストア全体で
+ * 共有する単一のロック（[StoreWriteLock]）で直列化する（設計 §11.5 の Mutex。単一プロセス
+ * 前提）。同じロックを [CaptureStore] も取るので、PNG の保存とも交錯しない。これにより
  * 並行する [saveRun] が「相手の run を見ていない古い索引」で新しい索引を上書きすることは
  * ない。[loadRun] / [loadRuns] はロックしない。各ファイルは rename で原子的に置き換わる
  * ので、読む側は常に「置き換え前」か「置き換え後」の完全な内容を見る。
@@ -80,7 +80,7 @@ class DocumentStore(root: Path) {
     private val indexFile: Path = indexDir.resolve("runs.idx")
 
     /** 書き込み（run 保存＋索引再生成）と索引読み込みを直列化する。再入可能。 */
-    private val writeLock = ReentrantLock()
+    private val writeLock = StoreWriteLock.lock
 
     private val json = Json {
         ignoreUnknownKeys = true
