@@ -12,7 +12,10 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,10 +23,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import net.st.hatsudesk.core.store.CaptureFile
 import net.st.hatsudesk.core.store.CaptureStore
 import java.io.ByteArrayOutputStream
@@ -39,6 +44,8 @@ data class CaptureState(
     val savedCount: Int = 0,
     /** 最後に保存したファイルの「名前（サイズ）」。まだ保存していなければ null。 */
     val lastCapture: String? = null,
+    /** 最後の取得で、押してから書き終わるまでにかかった時間（ms）。 */
+    val lastCaptureMs: Long? = null,
     /** 利用者に見せる日本語の一言。失敗や拒否の理由。 */
     val message: String? = null,
 ) {
@@ -79,6 +86,12 @@ object CaptureController {
     /** 最新1枚と、書き込み中の1枚を同時に持てれば足りる。 */
     private const val MAX_IMAGES = 2
 
+    /**
+     * ボタンを隠してから待つ上限。**固定の撮影待ちではない。** 待つのはフレームの到着で、
+     * 通常は2枚で 30〜40ms。ここは「合成が止まっている」と判断して諦めるまでの時間。
+     */
+    private const val OVERLAY_HIDE_TIMEOUT_MS = 180L
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val session = ProjectionSession()
@@ -110,11 +123,26 @@ object CaptureController {
     private var thread: HandlerThread? = null
     private var buffer: LatestFrameBuffer? = null
 
+    /**
+     * 取得ボタン。投影中だけ存在する。停止・失効・サービス終了はどれも
+     * [releaseLocked] を通るので、オーバーレイだけが残る経路は無い。
+     */
+    private var overlay: CaptureOverlayButton? = null
+
+    /** 届いたフレームの通し番号。ボタンを隠した後に新しいフレームが来たかを見る。 */
+    private val frameSerial = MutableStateFlow(0L)
+
+    private val freshFrames = FreshFrameGate()
+
+    /** 取得の最中か。連打で「隠す・戻す」が重ならないようにする（メインスレッドだけ）。 */
+    private var capturing = false
+
     /** こちらの [releaseLocked] から `stop()` した時に callback が二重に片付けないための印。 */
     private var releasing = false
 
     private var savedCount = 0
     private var lastCapture: String? = null
+    private var lastCaptureMs: Long? = null
     private var message: String? = null
 
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -263,6 +291,9 @@ object CaptureController {
             } ?: return@setOnImageAvailableListener
             val wasEmpty = !frames.hasFrame()
             frames.offer(image)
+            // 通し番号は「ボタンを隠した後に届いたか」の判定にだけ使う。
+            // リスナーは1本の HandlerThread で走るので、加算で足りる。
+            frameSerial.value = frameSerial.value + 1
             if (wasEmpty) scope.launch { onFirstFrame() }
         }, handler)
 
@@ -303,6 +334,7 @@ object CaptureController {
         thread = projectionThread
         buffer = frames
         message = null
+        startOverlayLocked()
         publish()
         return true
     }
@@ -316,22 +348,146 @@ object CaptureController {
         publish()
     }
 
-    /** いまのフレームを1枚、`files/captures/<timestamp>.png` に保存する。 */
-    fun save() {
+    /** いまのフレームを1枚、`files/captures/<timestamp>.png` に保存する（アプリ画面のボタン）。 */
+    fun save() = capture(notifyWithToast = false)
+
+    /** オーバーレイのボタンから保存する。押した本人が画像に写らないようにする。 */
+    fun captureFromOverlay() = capture(notifyWithToast = true)
+
+    /**
+     * 1枚保存する。
+     *
+     * **押した時点のフレームを先に確保してから隠す、では焼き付きは消えない。** バッファの
+     * 最新フレームは自分が合成された後の絵なので、確保した1枚にボタンが写っている。
+     * 順序を逆にして、隠す → 隠した後に届いたフレームを待つ → 写し取る → 戻す、とする。
+     *
+     * 待つのは時間ではなくフレームの到着（[frameSerial]）。固定の待ちを入れないので、
+     * 速い端末では数十 ms で終わり、遅い端末でも取りこぼさない。180ms 待っても
+     * 1枚も来なければ、手元の絵はボタンが写ったままなので保存しない。
+     */
+    private fun capture(notifyWithToast: Boolean) {
+        // 取得中に押された分は捨てる。隠している最中に次の「隠す」が重なると、
+        // 戻す順序が入れ替わってボタンが消えたままになる。
+        if (capturing) return
         if (!session.isRunning) {
-            setMessage("投影していないので保存できません")
+            report("投影していないので保存できません", notifyWithToast)
             return
         }
         if (buffer?.hasFrame() != true) {
-            setMessage("フレームがまだ届いていません")
+            report("フレームがまだ届いていません", notifyWithToast)
             return
         }
+
+        capturing = true
+        val pressedAt = SystemClock.elapsedRealtime()
+        val button = overlay
+        // 隠す前に待つべき番号を決める（隠した後に届いた1枚目から数える）。
+        freshFrames.after(frameSerial.value)
+        button?.hide()
+        val hiddenAt = SystemClock.elapsedRealtime()
+
         scope.launch {
-            saveMutex.withLock { writeOneFrame() }
+            var restored = false
+            try {
+                val fresh = withTimeoutOrNull(OVERLAY_HIDE_TIMEOUT_MS) {
+                    frameSerial.first { freshFrames.isReady(it) }
+                } != null
+                // 2枚待てなくても、隠した後に1枚でも届いていれば絵はボタンの無い合成結果。
+                val usable = fresh || freshFrames.hasAnyNewFrame(frameSerial.value)
+                val snapshot = if (usable) grabFrame() else null
+                // 画素を写し取ったらすぐ戻す。PNG の圧縮と書き込みの間、画面に穴を空けない。
+                if (button != null && !restored) {
+                    restoreOverlay(button)
+                    restored = true
+                }
+                val shownAt = SystemClock.elapsedRealtime()
+
+                if (snapshot == null) {
+                    val text = if (usable) "フレームがありません" else "画面が更新されないため取得できませんでした"
+                    setMessage(text)
+                    if (notifyWithToast) toast(text)
+                    return@launch
+                }
+                val stored = storeFrame(snapshot)
+                val totalMs = SystemClock.elapsedRealtime() - pressedAt
+                if (stored == null) {
+                    if (notifyWithToast) toast("保存に失敗しました")
+                    return@launch
+                }
+                val (file, total) = stored
+                Log.i(
+                    LOG_TAG,
+                    "capture: press→hidden=${hiddenAt - pressedAt}ms, " +
+                        "hidden→restored=${shownAt - hiddenAt}ms, fresh=$fresh, " +
+                        "total=${totalMs}ms, bytes=${file.sizeBytes}",
+                )
+                synchronized(this@CaptureController) {
+                    lastCapture = "${file.name}（${formatSize(file.sizeBytes)}）"
+                    lastCaptureMs = totalMs
+                    message = "1枚保存しました"
+                    // 保存の反映も読み直しと同じ世代で順序を決める（古い一覧に巻き戻されない）。
+                    savedCountRefresh.record(total)
+                }
+                publish()
+                if (notifyWithToast) toast("保存しました")
+            } finally {
+                if (button != null && !restored) restoreOverlay(button)
+                capturing = false
+            }
         }
     }
 
+    /** 画面の向きが変わった。ボタンが画面の外に残らないよう位置を移す。 */
+    @Synchronized
+    fun onConfigurationChanged() {
+        overlay?.onScreenChanged()
+    }
+
     // ---- 内部 ----
+
+    /**
+     * 取得ボタンを出す。`SYSTEM_ALERT_WINDOW` が無いときは出さない（投影は続ける）。
+     * 権限は人が設定画面で許可するもので、ここから要求はしない。
+     */
+    private fun startOverlayLocked() {
+        val context = appContext ?: return
+        if (overlay != null) return
+        if (!Settings.canDrawOverlays(context)) {
+            message = "オーバーレイの権限が無いため、取得ボタンは出していません"
+            return
+        }
+        val button = CaptureOverlayButton(context) { captureFromOverlay() }
+        overlay = if (button.show()) {
+            button
+        } else {
+            message = "取得ボタンを出せませんでした"
+            null
+        }
+    }
+
+    /**
+     * 取得のために隠したボタンを戻す。**投影が終わっていれば戻さない。**
+     * 停止と取得が重なったときに、投影の無い画面へボタンだけが戻る経路を塞ぐ。
+     */
+    @Synchronized
+    private fun restoreOverlay(button: CaptureOverlayButton) {
+        if (overlay !== button) return
+        if (!session.isRunning) return
+        button.show()
+    }
+
+    /** 失敗の一言。オーバーレイから押されたときは画面の外にいるのでトーストでも知らせる。 */
+    @Synchronized
+    private fun report(text: String, notifyWithToast: Boolean) {
+        message = text
+        publish()
+        if (notifyWithToast) toast(text)
+    }
+
+    private fun toast(text: String) {
+        val context = appContext ?: return
+        runCatching { Toast.makeText(context, text, Toast.LENGTH_SHORT).show() }
+    }
 
     @Synchronized
     private fun onFirstFrame() {
@@ -351,6 +507,9 @@ object CaptureController {
     private fun releaseLocked() {
         releasing = true
         try {
+            // オーバーレイは投影より先に消す。投影が止まった後にボタンだけ残る経路を作らない。
+            overlay?.hide()
+            overlay = null
             buffer?.clear()
             buffer = null
             reader?.setOnImageAvailableListener(null, null)
@@ -371,18 +530,16 @@ object CaptureController {
         }
     }
 
-    private suspend fun writeOneFrame() {
-        val frames = buffer ?: run {
-            setMessage("フレームがありません")
-            return
-        }
-        val saved = try {
-            withContext(Dispatchers.IO) {
-                // 最新1枚を写し取る。バッファからは消さない（静止画でも何度でも保存できる）。
-                val snapshot = frames.withLatest { image -> image.copyToBitmap() }
-                if (snapshot == null) {
-                    null
-                } else {
+    /** 最新1枚を Bitmap に写し取る。バッファからは消さない。呼出側が recycle する。 */
+    private suspend fun grabFrame(): Bitmap? = withContext(Dispatchers.Default) {
+        buffer?.withLatest { image -> image.copyToBitmap() }
+    }
+
+    /** PNG にして `captures/` へ書く。書けたらファイルと保存後の枚数。失敗は null。 */
+    private suspend fun storeFrame(snapshot: Bitmap): Pair<CaptureFile, Int>? =
+        saveMutex.withLock {
+            try {
+                withContext(Dispatchers.IO) {
                     try {
                         val store = captureStore()
                         // 書き込み前の一覧で名前を決め、保存後の実数も同じ一覧から出す。
@@ -394,29 +551,14 @@ object CaptureController {
                         snapshot.recycle()
                     }
                 }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                Log.e(LOG_TAG, "フレームを保存できませんでした", error)
+                setMessage("保存に失敗しました（${describe(error)}）")
+                null
             }
-        } catch (cancel: CancellationException) {
-            throw cancel
-        } catch (error: Throwable) {
-            Log.e(LOG_TAG, "フレームを保存できませんでした", error)
-            setMessage("保存に失敗しました（${describe(error)}）")
-            return
         }
-
-        if (saved == null) {
-            setMessage("フレームがまだ届いていません")
-            return
-        }
-        val (file, total) = saved
-
-        // 投影が止まった後に書き終わった場合でも、枚数とファイル名は出す。
-        synchronized(this) {
-            lastCapture = "${file.name}（${formatSize(file.sizeBytes)}）"
-            message = "1枚保存しました"
-            // 保存の反映も読み直しと同じ世代で順序を決める（古い一覧に巻き戻されない）。
-            savedCountRefresh.record(total)
-        }
-    }
 
     /**
      * RGBA_8888 の [Image] から、行のパディングを落とした [Bitmap] を作る。
@@ -490,6 +632,7 @@ object CaptureController {
             hasFrame = session.isRunning && buffer?.hasFrame() == true,
             savedCount = savedCount,
             lastCapture = lastCapture,
+            lastCaptureMs = lastCaptureMs,
             message = message,
         )
     }
