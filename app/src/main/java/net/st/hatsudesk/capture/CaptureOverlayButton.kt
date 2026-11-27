@@ -178,6 +178,16 @@ class CaptureOverlayButton(
         button.parent != null || button.isAttachedToWindow || button.windowToken != null
 
     /**
+     * 画面上のボタンの矩形（px、左上が原点）。投影の絵と同じ座標系。
+     *
+     * 取得のとき、この矩形の画素を「押した瞬間」と「隠した後」で比べる（焼き付きの判定）。
+     * 画面に載っていなければ読めないので null。窓は `FLAG_LAYOUT_IN_SCREEN` と
+     * `Gravity.TOP or Gravity.START` なので、オフセットがそのまま画面座標になる。
+     */
+    internal fun boundsOnScreen(): PixelRect? =
+        if (attachment.isAttached) PixelRect(position.x, position.y, sizePx, sizePx) else null
+
+    /**
      * 画面の大きさが変わった。ボタンが画面の外に残らないよう、位置を移し直す。
      * 表示していない間（取得のため一瞬隠している間）も位置だけは追従させる。
      */

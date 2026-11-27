@@ -108,6 +108,8 @@ fun ProjectionScreen(onBack: () -> Unit) {
     // ファイルが消えたときに「保存した枚数」がずれ、通知を後から許可しても説明が残る。
     LifecycleResumeEffect(context) {
         CaptureController.refreshSavedCount()
+        // 停止時に外せなかったボタンがあれば、ここで外し直す（投影中は何もしない）。
+        CaptureController.retryOverlayRemoval()
         notificationDenied = !notificationPermissionGranted(context)
         overlayAllowed = Settings.canDrawOverlays(context)
         onPauseOrDispose {}

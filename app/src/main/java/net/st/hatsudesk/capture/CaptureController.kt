@@ -137,8 +137,19 @@ object CaptureController {
     /**
      * 取得ボタン。投影中だけ存在する。停止・失効・サービス終了はどれも
      * [releaseLocked] を通るので、オーバーレイだけが残る経路は無い。
+     *
+     * **外れたと確認できるまで参照を捨てない**（[OverlayCleanup]）。停止時の
+     * `removeViewImmediate()` が外れないことがあり、参照を捨てると二度と消せない。
      */
-    private var overlay: CaptureOverlayButton? = null
+    private val overlayCleanup = OverlayCleanup<CaptureOverlayButton> { button -> button.hide() }
+
+    /**
+     * 停止の段取り。**停止済みでも残ったボタンを外しにいく**（[StopSequence]）。
+     * `requestStop()` の false で早期 return すると、1回目の停止で外せなかったボタンを
+     * 2回目の `stop()` で外せない（停止中は `capture()` も先に return するため、
+     * 取得からも再試行できない）。
+     */
+    private val stopSequence = StopSequence(session, overlayCleanup) { releaseLocked() }
 
     /** 取得の最中か。連打で「隠す・戻す」が重ならないようにする（メインスレッドだけ）。 */
     private var capturing = false
@@ -225,12 +236,8 @@ object CaptureController {
     /** サービスの起動に失敗した等、投影を始められなかった。 */
     @Synchronized
     fun failStart(reason: String) {
-        if (!session.requestStop()) {
-            message = reason
-            publish()
-            return
-        }
-        releaseLocked()
+        // 停止が成立すればセッションも解放する。成立しなくても、残ったボタンは外しにいく。
+        stopSequence.stop()
         message = reason
         publish()
     }
@@ -350,13 +357,27 @@ object CaptureController {
         return true
     }
 
-    /** 停止。すでに停止していれば何もしない。 */
+    /**
+     * 停止。停止が成立したら状態と一言を更新する。
+     *
+     * **停止済みでも、前回の停止で外せなかったボタンを外しにいく**（[StopSequence]）。
+     * ここが「停止中でも呼べる掃除の経路」。参照は外れたと確認できたときだけ手放す。
+     */
     @Synchronized
     fun stop(reason: String? = null) {
-        if (!session.requestStop()) return
-        releaseLocked()
+        val stopped = stopSequence.stop()
+        if (!stopped) return
         message = reason
         publish()
+    }
+
+    /**
+     * 停止時に外せなかったボタンを、もう一度外しにいく。画面に戻ってきたとき（`ON_RESUME`）に呼ぶ。
+     * 投影中は触らない。外れたら参照を手放し、外れなければ次の機会に持ち越す。
+     */
+    @Synchronized
+    fun retryOverlayRemoval() {
+        stopSequence.sweepIfStopped()
     }
 
     /** いまのフレームを1枚、`files/captures/<timestamp>.png` に保存する（アプリ画面のボタン）。 */
@@ -370,17 +391,23 @@ object CaptureController {
      *
      * **押した時点のフレームを先に確保してから隠す、では焼き付きは消えない。** バッファの
      * 最新フレームは自分が合成された後の絵なので、確保した1枚にボタンが写っている。
-     * 順序を逆にして、隠す → 隠した後に合成されたフレームを待つ → 写し取る → 戻す、とする。
+     * 順序を逆にして、隠す → 隠した後のフレームを待つ → **画素でボタンが消えたことを確かめる**
+     * → 写し取る → 戻す、とする。
      *
-     * 待つのは枚数ではなく時刻（[CapturePlan]）。`Image.getTimestamp()` はフレームが
-     * 合成された時刻（ns、`System.nanoTime()` と同じ単調時計）なので、hide が完了した
-     * 時刻と比べれば、隠す前に生成されてキューに残っていたフレームは必ず落ちる。
-     * 通し番号では「隠す前に合成された2枚」を「隠した後の2枚」と数えてしまい得た。
+     * **時刻では焼き付きを証明できない。** `Image.getTimestamp()` は合成時刻ではなく、
+     * 最後の sink へ `queueBuffer()` した時刻なので、隠す前に合成された絵が隠した後に
+     * キューされれば「隠した後」の時刻を持つ。時刻は候補を絞る一次フィルタにだけ使い、
+     * **保存してよいかの最終判断は画素**（[OverlayPixelCheck]）で行う。
      *
-     * 条件を満たす**最初の1枚**で撮る。2枚目は待たない。
+     * 1. 押した瞬間の最新フレーム（ボタンが写っている）から、ボタンの矩形の画素を控える
+     * 2. 隠す（現行の手順のまま）
+     * 3. 候補フレームの同じ矩形の画素を控えたものと比べる
+     * 4. 差が大きい＝ボタンが消えて下の絵が出ている → 保存
+     * 5. 差が小さい＝ボタンが残っている → 捨てて次のフレームでやり直す（[VerifiedFrameGate]）
+     * 6. [OVERLAY_HIDE_TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
      *
-     * 隠すボタンが無い（オーバーレイ未許可）ときは待たない。静止した画面では新しい
-     * フレームが来ないので、待つと必ず失敗する。いまの最新1枚をそのまま保存する。
+     * 隠すボタンが無い（オーバーレイ未許可）ときは隠すものが無いので、待たずに最新1枚を
+     * そのまま保存する。静止した画面では新しいフレームが来ないので、待つと必ず失敗する。
      */
     private fun capture(notifyWithToast: Boolean) {
         // 取得中に押された分は捨てる。隠している最中に次の「隠す」が重なると、
@@ -397,51 +424,80 @@ object CaptureController {
             return
         }
 
+        val button = overlayCleanup.peek()
+        // 画素で比べる矩形。ボタンが画面に載っていなければ読めない。
+        val rect = button?.boundsOnScreen()
+        if (button != null && rect == null) {
+            // どこを見ればよいか分からないまま「隠した」と判断しない。保存しない側に倒す。
+            report("取得ボタンの位置を確認できないため保存しませんでした", notifyWithToast)
+            return
+        }
+
         capturing = true
         val pressedAt = SystemClock.elapsedRealtime()
-        val button = overlay
-        // 隠せなかったら撮らない。隠れていないボタンが写った1枚を残さない。
-        val hidden = button?.hide() ?: true
-        // ここが「隠し終えた時刻」。外れたことを確かめた直後に読む。フレームの時刻と
-        // 同じ単調時計なので、そのまま比べられる（ms に丸めない）。
-        val hideCompletedAtNanos = if (button != null) System.nanoTime() else null
-        val hiddenAt = SystemClock.elapsedRealtime()
-        val plan = CapturePlan.forPress(hideCompletedAtNanos)
 
         scope.launch {
             // 隠せたときだけ戻す。隠せていない（状態が不確かな）ときに show() を呼ぶと、
             // 画面に残っている View へ addView してしまい、かえって消すことになる。
-            var pendingRestore = if (hidden) button else null
+            var pendingRestore: CaptureOverlayButton? = null
             try {
+                // 1. 押した瞬間の最新フレームから、ボタンの矩形の画素を控える。
+                //    まだ隠していないので、この1枚にはボタンが写っている。
+                val baseline = if (rect != null) grabRect(frames, rect) else null
+                if (rect != null && baseline == null) {
+                    val text = "取得ボタンの画素を読めないため保存しませんでした"
+                    setMessage(text)
+                    if (notifyWithToast) toast(text)
+                    return@launch
+                }
+                // 2. 隠す。隠せなかったら撮らない（隠れていないボタンが写った1枚を残さない）。
+                val hidden = button?.hide() ?: true
+                pendingRestore = if (hidden) button else null
                 if (!hidden) {
                     val text = "取得ボタンを隠せなかったため保存しませんでした"
                     setMessage(text)
                     if (notifyWithToast) toast(text)
                     return@launch
                 }
-                if (plan.waitsForFrames) {
-                    // 条件を満たす最初の1枚まで待つ。すでに満たす1枚がバッファにあれば
-                    // first はその場で返るので、余計な待ちは足さない。
-                    val arrived = withTimeoutOrNull(OVERLAY_HIDE_TIMEOUT_MS) {
-                        frames.stamp.first { plan.accepts(it) }
-                    }
-                    if (arrived == null) {
-                        // 隠した後に合成されたフレームが来なかった。それが隠す前のフレーム
-                        // かもしれないので保存しない。
-                        setMessage(CapturePlan.STALLED_MESSAGE)
-                        if (notifyWithToast) toast(CapturePlan.STALLED_MESSAGE)
-                        return@launch
+                // ここが「隠し終えた時刻」。時刻は一次フィルタにだけ使う。
+                val hideCompletedAtNanos = if (button != null) System.nanoTime() else null
+                val hiddenAt = SystemClock.elapsedRealtime()
+                val plan = CapturePlan.forPress(hideCompletedAtNanos)
+                val check = if (rect != null && baseline != null) OverlayPixelCheck(rect, baseline) else null
+                val gate = VerifiedFrameGate(plan, check)
+                val deadlineAt = hiddenAt + OVERLAY_HIDE_TIMEOUT_MS
+
+                // 3〜6. 候補を撮り、画素で確かめ、駄目なら次のフレームでやり直す。
+                var snapshot: Bitmap? = null
+                var discarded = 0
+                while (snapshot == null) {
+                    val remaining = deadlineAt - SystemClock.elapsedRealtime()
+                    if (remaining <= 0) break
+                    // 条件を満たす候補がすでにあれば first はその場で返る。
+                    val woke = withTimeoutOrNull(remaining) { frames.stamp.first { gate.wants(it) } }
+                    if (woke == null) break
+                    when (val shot = takeShot(frames, gate, rect)) {
+                        null -> break // 世代が変わった（停止→再開）。古いフレームは使わない。
+                        is Shot.Burned -> {
+                            gate.discard(shot.stampNanos)
+                            discarded += 1
+                        }
+                        is Shot.Taken -> snapshot = shot.bitmap
                     }
                 }
-                val snapshot = grabFrame(frames, plan.hiddenAtNanos)
                 // 画素を写し取ったらすぐ戻す。PNG の圧縮と書き込みの間、画面に穴を空けない。
                 pendingRestore?.let { restoreOverlay(it) }
                 pendingRestore = null
                 val grabbedAt = SystemClock.elapsedRealtime()
 
                 if (snapshot == null) {
-                    setMessage("フレームがありません")
-                    if (notifyWithToast) toast("フレームがありません")
+                    // 隠した後のフレームが来なかったか、来てもボタンが残っていた。保存しない。
+                    // 途中で停止された場合は、停止の一言を上書きしない（投影の話ではない）。
+                    if (session.isRunning) {
+                        setMessage(CapturePlan.STALLED_MESSAGE)
+                        if (notifyWithToast) toast(CapturePlan.STALLED_MESSAGE)
+                    }
+                    Log.w(LOG_TAG, "capture: 焼き付きを排除できず中止（捨てた候補=$discarded）")
                     return@launch
                 }
                 val stored = storeFrame(snapshot)
@@ -456,7 +512,7 @@ object CaptureController {
                     "capture: press→hidden=${hiddenAt - pressedAt}ms, " +
                         "hidden→grab=${grabbedAt - hiddenAt}ms, " +
                         "grab→done=${totalMs - (grabbedAt - pressedAt)}ms, " +
-                        "total=${totalMs}ms, bytes=${file.sizeBytes}",
+                        "discarded=$discarded, total=${totalMs}ms, bytes=${file.sizeBytes}",
                 )
                 synchronized(this@CaptureController) {
                     lastCapture = "${file.name}（${formatSize(file.sizeBytes)}）"
@@ -477,7 +533,7 @@ object CaptureController {
     /** 画面の向きが変わった。ボタンが画面の外に残らないよう位置を移す。 */
     @Synchronized
     fun onConfigurationChanged() {
-        overlay?.onScreenChanged()
+        overlayCleanup.peek()?.onScreenChanged()
     }
 
     // ---- 内部 ----
@@ -488,20 +544,20 @@ object CaptureController {
      */
     private fun startOverlayLocked() {
         val context = appContext ?: return
-        if (overlay != null) return
+        if (overlayCleanup.isHeld) return
         if (!Settings.canDrawOverlays(context)) {
             message = "オーバーレイの権限が無いため、取得ボタンは出していません"
             return
         }
         val button = CaptureOverlayButton(context) { captureFromOverlay() }
         if (button.show()) {
-            overlay = button
+            overlayCleanup.hold(button)
             return
         }
         // 出したものの外せなかった View は、停止時に外せるよう参照を残す。
         // 参照を失うと、画面に残ったボタンを二度と消せない。
         if (button.isAttached) {
-            overlay = button
+            overlayCleanup.hold(button)
             message = "取得ボタンの準備に失敗しました"
         } else {
             message = "取得ボタンを出せませんでした"
@@ -514,7 +570,7 @@ object CaptureController {
      */
     @Synchronized
     private fun restoreOverlay(button: CaptureOverlayButton) {
-        if (overlay !== button) return
+        if (overlayCleanup.peek() !== button) return
         if (!session.isRunning) return
         if (!button.show()) Log.w(LOG_TAG, "取得ボタンを戻せませんでした")
     }
@@ -539,8 +595,8 @@ object CaptureController {
 
     @Synchronized
     private fun handleSystemStop() {
-        if (!session.onSystemStop()) return
-        releaseLocked()
+        // 停止済みでも、前回外せなかったボタンはここで試し直す（StopSequence）。
+        if (!stopSequence.stop()) return
         message = "OS 側で投影が終了しました"
         publish()
     }
@@ -551,20 +607,9 @@ object CaptureController {
         releasing = true
         try {
             // オーバーレイは投影より先に消す。投影が止まった後にボタンだけ残る経路を作らない。
-            // 外せなかったときは参照を捨てない（次の停止・取得で外し直せるようにする）。
-            val button = overlay
-            overlay = null
-            if (button != null) {
-                val removed = try {
-                    button.hide()
-                } catch (error: Throwable) {
-                    Log.e(LOG_TAG, "取得ボタンを外せませんでした", error)
-                    false
-                }
-                if (!removed) {
-                    overlay = button
-                    Log.e(LOG_TAG, "取得ボタンが画面に残っています。次の停止で外し直します")
-                }
+            // 外せなかったときは参照を捨てない（次の停止・画面の再表示で外し直せるようにする）。
+            if (!overlayCleanup.release()) {
+                Log.e(LOG_TAG, "取得ボタンが画面に残っています。次の停止で外し直します")
             }
             // 世代ごと捨てる。以後その世代へ届いたフレームは閉じられ、保存に使われない。
             frameStore.end()
@@ -586,20 +631,47 @@ object CaptureController {
         }
     }
 
+    /** 画素で確かめた1枚。[Burned] は「ボタンがまだ写っている」＝保存しない候補。 */
+    private sealed interface Shot {
+        class Taken(val bitmap: Bitmap, val stampNanos: Long) : Shot
+        class Burned(val stampNanos: Long) : Shot
+    }
+
     /**
-     * 最新1枚を Bitmap に写し取る。バッファからは消さない。呼出側が recycle する。
-     * [sinceNanos] を渡したときは、その時刻以降に合成された1枚だけを写す
-     * （隠す前に生成されたフレームを保存に使わない）。
+     * ボタンの矩形の画素を、押した瞬間のフレームから控える（ボタンが写っている側）。
+     * 矩形が画像に収まらない・フレームが無いときは null。
      */
-    private suspend fun grabFrame(frames: FrameStore.Session<Image>, sinceNanos: Long?): Bitmap? =
+    private suspend fun grabRect(frames: FrameStore.Session<Image>, rect: PixelRect): IntArray? =
         withContext(Dispatchers.Default) {
-            val copy: (Image) -> Bitmap = { image -> image.copyToBitmap() }
-            if (sinceNanos == null) {
-                frameStore.withLatest(frames, copy)
+            frameStore.withLatest(frames) { image -> image.copyRectArgb(rect) }
+        }
+
+    /**
+     * 候補フレームを1枚取り、**保存してよいかを画素で確かめる**。バッファは消費しない。
+     *
+     * 矩形の画素を読み、控えた画素と比べてボタンが消えていれば [Shot.Taken]（全体を Bitmap に
+     * 写す）。残っていれば [Shot.Burned]。Bitmap への写しは判断が通った1枚だけでよい。
+     */
+    private suspend fun takeShot(
+        frames: FrameStore.Session<Image>,
+        gate: VerifiedFrameGate,
+        rect: PixelRect?,
+    ): Shot? = withContext(Dispatchers.Default) {
+        frameStore.withLatestAfter(frames, gate.sinceNanos) { image ->
+            val stamp = image.timestamp
+            if (rect == null) {
+                Shot.Taken(image.copyToBitmap(), stamp)
             } else {
-                frameStore.withLatestAfter(frames, sinceNanos, copy)
+                val candidate = image.copyRectArgb(rect)
+                // 矩形が読めない（画面の大きさが変わった等）ときは保存しない側に倒す。
+                if (candidate == null || !gate.keeps(candidate)) {
+                    Shot.Burned(stamp)
+                } else {
+                    Shot.Taken(image.copyToBitmap(), stamp)
+                }
             }
         }
+    }
 
     /** PNG にして `captures/` へ書く。書けたらファイルと保存後の枚数。失敗は null。 */
     private suspend fun storeFrame(snapshot: Bitmap): Pair<CaptureFile, Int>? =
@@ -625,6 +697,34 @@ object CaptureController {
                 null
             }
         }
+
+    /**
+     * RGBA_8888 の [Image] から、指定した矩形の画素を ARGB の配列で読む（行優先）。
+     *
+     * 全体を Bitmap に写すと 1080×2410 で 10MB になるが、ボタンの矩形は 116×116 で約 54KB。
+     * 判定のたびに全体を写さずに済むよう、必要なところだけ読む。矩形が画像に収まらなければ null。
+     */
+    private fun Image.copyRectArgb(rect: PixelRect): IntArray? {
+        if (!rect.fitsIn(width, height)) return null
+        val plane = planes.firstOrNull() ?: return null
+        val pixelStride = plane.pixelStride
+        if (pixelStride < 3) return null
+        val buffer = plane.buffer
+        val pixels = IntArray(rect.pixelCount)
+        var index = 0
+        for (row in rect.y until rect.y + rect.height) {
+            val rowStart = row * plane.rowStride
+            for (column in rect.x until rect.x + rect.width) {
+                val offset = rowStart + column * pixelStride
+                val red = buffer.get(offset).toInt() and 0xFF
+                val green = buffer.get(offset + 1).toInt() and 0xFF
+                val blue = buffer.get(offset + 2).toInt() and 0xFF
+                pixels[index] = (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
+                index += 1
+            }
+        }
+        return pixels
+    }
 
     /**
      * RGBA_8888 の [Image] から、行のパディングを落とした [Bitmap] を作る。
