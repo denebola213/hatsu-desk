@@ -8,9 +8,13 @@ package net.st.hatsudesk.capture
  * 「ボタンが消えた」と誤認して保存し得る（PR #22 の blocking 指摘）。位置・配置世代・
  * 寸法のどれかが変わった候補は保存しない。
  *
- * 位置そのものは [layoutGeneration] で表す。ボタンは隠した後なので実座標を読み直せず、
- * 隠している間に動き得るのは回転・再配置だけである。それらは必ず世代を進める
- * （[CaptureOverlayButton]）ので、世代の一致で「同じ配置の画面か」を判定できる。
+ * **回転を見ているのは [layoutGeneration] で、寸法ではない。** `ImageReader.newInstance` と
+ * `VirtualDisplay` はセッション開始時の寸法で1回だけ作られ、回転しても作り直さない。
+ * よって `Image.width/height` はセッション中ずっと同じで、寸法の比較が偽になることは
+ * 本番では無い。寸法は「受け口と判定の前提が揃っている」ことを見る安い不変条件として
+ * 残しているだけなので、これを回転の検出根拠として扱わない。回転は
+ * [CaptureOverlayButton.layoutGeneration] が進むことで分かる（聞き手はセッションの間ずっと
+ * 生きており、ボタンを隠している間の回転も届く）。
  *
  * @param rect 隠す直前に読んだ**実 View の画面座標**（論理 `position` ではない）。
  * @param layoutGeneration 配置が変わるたびに増える番号。押した時点の値。
@@ -24,7 +28,12 @@ internal data class CaptureGeometry(
     val imageHeight: Int,
 ) {
 
-    /** 候補がこの配置・寸法のままの画面か。 */
+    /**
+     * 候補がこの配置・寸法のままの画面か。
+     *
+     * 配置（＝回転・再配置）は [layoutGeneration] で見る。寸法の一致は不変条件の確認で、
+     * 回転の検出ではない（上の説明）。
+     */
     fun stillDescribes(layoutGeneration: Long, imageWidth: Int, imageHeight: Int): Boolean =
         this.layoutGeneration == layoutGeneration &&
             this.imageWidth == imageWidth &&

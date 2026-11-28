@@ -152,9 +152,10 @@ class CaptureService : Service() {
     }
 
     /**
-     * 画面の回転。オーバーレイのボタンは Activity の一部ではないので、ここで位置を
-     * 移し直さないと画面の外に取り残される（ボタン自身も DisplayManager を見ているが、
-     * サービスが生きている間はこちらが確実）。
+     * 画面の回転。オーバーレイのボタンは Activity の一部ではないので、ここでも位置を
+     * 移し直す。**これは補助で、これに依存しない。** ボタン自身の [DisplayManager] の
+     * 聞き手はセッションの間ずっと生きており、取得のため隠している間の回転も受け取る
+     * （サービスが構成変更を受け取れるかどうかに関係なく、取得は古い矩形で判定しない）。
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)

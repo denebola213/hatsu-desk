@@ -171,18 +171,6 @@ class CaptureGeometryTest {
     }
 
     @Test
-    fun changedImageSizeIsNeverSaved() {
-        // 回転で画像の寸法が変わった。同じ矩形でも座標の意味が変わるので保存しない。
-        val button = FakeButton(atA)
-        val attempt = Attempt(button, imageWidth, imageHeight, hideAt)
-
-        attempt.deliver(hideAt + 50_000_000, sampledPixels(background), imageWidth = 2400, imageHeight = 1080)
-
-        assertNull(attempt.saved)
-        assertEquals(1, attempt.moved)
-    }
-
-    @Test
     fun rectOutsideImageIsNotSampled() {
         // 隠す前に読んだ矩形が画像の外にはみ出していたら、そもそも取得しない。
         val outside = PixelRect(1000, 2300, 116, 116)

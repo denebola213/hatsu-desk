@@ -12,6 +12,11 @@ import org.junit.Test
  * 外れたかを View の状態で確かめ、外れていなければ短い間隔で試し直す。
  * それでも外れなければ「出たまま」として参照を残し、停止時や次の取得で再試行できるようにする。
  * ここでは窓を偽物にして、その順序を機械的に再現する。
+ *
+ * あわせて**聞き手の寿命**を固定する。取得はボタンを一瞬隠すが、隠している間も回転は
+ * 起こり得る。隠すたびに `unregister()` すると、その間だけ配置の変化が届かず、取得が
+ * 古い矩形のまま判定してしまう。聞き手を降ろすのはセッション終了（[OverlayAttachment.release]）
+ * だけ。
  */
 class OverlayAttachmentTest {
 
@@ -23,6 +28,8 @@ class OverlayAttachmentTest {
         var unregisters = 0
         var removes = 0
         var pauses = 0
+        var listening = false
+            private set
 
         /** false にすると removeView は例外を投げずに何もしない。 */
         var removeWorks = true
@@ -39,10 +46,12 @@ class OverlayAttachmentTest {
         override fun register() {
             registers += 1
             onRegister()
+            listening = true
         }
 
         override fun unregister() {
             unregisters += 1
+            listening = false
         }
 
         override fun isOnScreen(): Boolean = onScreen
@@ -69,8 +78,10 @@ class OverlayAttachmentTest {
         // 出したまま参照を失わない。必ず回収する。
         assertEquals(1, window.adds)
         assertEquals(1, window.removes)
+        // 登録が半分だけ通っている可能性があるので、降ろすところまでやる。
         assertEquals(1, window.unregisters)
         assertFalse(attachment.isAttached)
+        assertFalse(attachment.isListening)
     }
 
     @Test
@@ -97,6 +108,9 @@ class OverlayAttachmentTest {
         assertTrue(attachment.detach())
         assertEquals(1, window.removes)
         assertFalse(attachment.isAttached)
+        // 取得のための一時的な hide。聞き手はまだ生きている。
+        assertTrue(attachment.isListening)
+        assertEquals(0, window.unregisters)
     }
 
     @Test
@@ -146,9 +160,12 @@ class OverlayAttachmentTest {
 
         // 参照が残っているので、後から外せる。
         window.removeWorks = true
-        assertTrue(attachment.detach())
+        assertTrue(attachment.release())
         assertFalse(window.onScreen)
         assertFalse(attachment.isAttached)
+        // 外れたときに初めて聞き手を降ろす。
+        assertEquals(1, window.unregisters)
+        assertFalse(attachment.isListening)
     }
 
     @Test
@@ -162,7 +179,8 @@ class OverlayAttachmentTest {
         assertTrue(attachment.detach())
 
         assertEquals(0, window.removes)
-        assertEquals(1, window.unregisters)
+        // 隠れただけ。聞き手はセッションの間は残す。
+        assertEquals(0, window.unregisters)
         assertFalse(attachment.isAttached)
     }
 
@@ -174,5 +192,54 @@ class OverlayAttachmentTest {
         assertTrue(attachment.attach())
         assertEquals(1, window.adds)
         assertEquals(1, window.registers)
+    }
+
+    /**
+     * 取得のたびに隠して戻しても、聞き手の登録は1回のまま。
+     * 隠すたびに登録・解除を繰り返すと、隠している間の回転を取りこぼす。
+     */
+    @Test
+    fun hideAndShowKeepOneRegistration() {
+        val window = FakeWindow()
+        val attachment = attachment(window)
+        assertTrue(attachment.attach())
+
+        assertTrue(attachment.detach())
+        assertTrue(attachment.detach())
+        assertTrue(attachment.attach())
+        assertTrue(attachment.attach())
+
+        assertEquals(2, window.adds)
+        assertEquals(1, window.registers)
+        assertEquals(0, window.unregisters)
+        assertTrue(attachment.isListening)
+    }
+
+    /** セッション終了だけが聞き手を降ろす。外れていれば解除し、外れなければ残す。 */
+    @Test
+    fun releaseStopsListeningOnlyWhenTheViewIsGone() {
+        val window = FakeWindow().apply { removeWorks = false }
+        val attachment = attachment(window)
+        assertTrue(attachment.attach())
+
+        // 外せない間は、残った View の位置を追えるよう聞き手を残す。
+        assertFalse(attachment.release())
+        assertEquals(0, window.unregisters)
+        assertTrue(attachment.isListening)
+
+        window.removeWorks = true
+        assertTrue(attachment.release())
+        assertEquals(1, window.unregisters)
+        assertFalse(attachment.isListening)
+    }
+
+    /** 一度も出していなければ、降ろす聞き手も無い。 */
+    @Test
+    fun releaseWithoutAttachIsSafe() {
+        val window = FakeWindow()
+        val attachment = attachment(window)
+
+        assertTrue(attachment.release())
+        assertEquals(0, window.unregisters)
     }
 }

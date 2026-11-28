@@ -12,10 +12,12 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
+import androidx.annotation.MainThread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -133,7 +135,7 @@ object CaptureController {
      * **外れたと確認できるまで参照を捨てない**（[OverlayCleanup]）。停止時の
      * `removeViewImmediate()` が外れないことがあり、参照を捨てると二度と消せない。
      */
-    private val overlayCleanup = OverlayCleanup<CaptureOverlayButton> { button -> button.hide() }
+    private val overlayCleanup = OverlayCleanup<CaptureOverlayButton> { button -> button.release() }
 
     /**
      * 停止の段取り。**停止済みでも残ったボタンを外しにいく**（[StopSequence]）。
@@ -143,7 +145,14 @@ object CaptureController {
      */
     private val stopSequence = StopSequence(session, overlayCleanup) { releaseLocked() }
 
-    /** 取得の最中か。連打で「隠す・戻す」が重ならないようにする（メインスレッドだけ）。 */
+    /**
+     * 取得の最中か。連打で「隠す・戻す」が重ならないようにする。
+     *
+     * 読む・立てる・降ろすはすべて main（[capture] の入口でスレッドを確かめる）だが、
+     * 取得の後片付けを `finally` で行う都合上、別スレッドから読まれても古い値を見ないよう
+     * `@Volatile` にする。
+     */
+    @Volatile
     private var capturing = false
 
     /** こちらの [releaseLocked] から `stop()` した時に callback が二重に片付けないための印。 */
@@ -388,14 +397,23 @@ object CaptureController {
      * suspend を跨いで隠していたため、その間に main のドラッグや回転がボタンを
      * **同じ大きさのまま**動かせた。すると旧矩形（非黒）を見て「消えた」と判断し、
      * 移動先の黒い印を残したフレームを保存してしまう（PR #22 の blocking 指摘）。
-     * いまは実 View の座標・配置世代・画像寸法を読み、**同じ main ターンの中で**隠し、
-     * その組（[CaptureGeometry]）と食い違う候補は保存しない。
+     * いまは [concealForCapture] が実 View の座標・配置世代・画像寸法を読み、**同じ main
+     * ターンの中で**隠し、その組（[CaptureGeometry]）と食い違う候補は保存しない。
+     *
+     * **回転は配置世代で見る。** 画像の寸法は回転の検出に使えない（`ImageReader` と
+     * `VirtualDisplay` はセッション開始時の寸法で1回だけ作られ、回転しても作り直されない）。
+     * 寸法の比較は前提が揃っているかを見る不変条件だけ。回転・再配置は
+     * [CaptureOverlayButton.layoutGeneration] が進むことで分かる。ボタンを隠している間も
+     * 画面の変化の聞き手は生きたままなので（[OverlayAttachment]）、隠した後に回転しても
+     * 世代が進み、古い矩形では判定しない。`CaptureService.onConfigurationChanged` には
+     * 依存しない（サービスが構成変更を受け取るかどうかに関係なく止まる）。
      *
      * 順序は次のとおり。
      * 1. 押した時点の実座標・配置世代・画像寸法を確定する（suspend しない）
      * 2. 続けて隠す（同じ main ターン）。隠せなかったら保存しない
      * 3. 隠し終えた時刻より後にキューされた候補だけを待つ
-     * 4. 候補の配置（世代・寸法）が 1. と違えば**中止**（保存しない・やり直さない）
+     * 4. 候補の配置（世代）が 1. と違えば**中止**（保存しない・やり直さない）。寸法も
+     *    突き合わせるが、これはセッション中一定の不変条件
      * 5. 同じ配置なら、矩形の平均輝度が 3 以上＝非黒なら保存。3 未満＝黒い印が
      *    残っているので捨て、次のフレームでやり直す（[VerifiedFrameGate]）
      * 6. [CaptureDeadline.TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
@@ -411,8 +429,19 @@ object CaptureController {
      *
      * 隠すボタンが無い（オーバーレイ未許可）ときは隠すものが無いので、待たずに最新1枚を
      * そのまま保存する。静止した画面では新しいフレームが来ないので、待つと必ず失敗する。
+     *
+     * **main スレッドからだけ呼ぶ。** [CaptureOverlayButton.captureGeometry] と `hide()` を
+     * 同じターンで行うことと、[capturing] の読み書きがこの前提で成り立つ。型（`@MainThread`）
+     * だけでは実行時に守られないので、入口でも確かめる。
      */
+    @MainThread
     private fun capture(notifyWithToast: Boolean) {
+        // 注釈は lint と読み手への約束で、実行時には効かない。前提が崩れたときに別スレッドで
+        // WindowManager を触ると、隠す順序が壊れて再現しにくい不具合になる。その場で落とす。
+        val looper = Looper.myLooper()
+        check(looper != null && looper == Looper.getMainLooper()) {
+            "capture() は main スレッドからだけ呼べます（いまは ${looper?.thread?.name ?: "Looper なし"}）"
+        }
         // 取得中に押された分は捨てる。隠している最中に次の「隠す」が重なると、
         // 戻す順序が入れ替わってボタンが消えたままになる。
         if (capturing) return
@@ -428,32 +457,43 @@ object CaptureController {
         }
 
         val button = overlayCleanup.peek()
+        // ImageReader / VirtualDisplay はセッション開始時の寸法で1回だけ作るので、この値は
+        // セッション中ずっと同じ。回転の検出には使えない（[CaptureGeometry]）。
         val imageWidth = reader?.width ?: 0
         val imageHeight = reader?.height ?: 0
         // ---- ここから hide まで suspend しない（同じ main ターンで終える） ----
-        // 位置の証拠は実 View の座標と配置世代。隠す前に確定させる。
+        // 位置の証拠は実 View の座標と配置世代。隠す前に確定させ、そのまま隠す。
+        // 「確定」と「隠す」を別々の呼び出しにすると、間に suspend を挟めてしまう。
+        val concealed = concealForCapture(
+            button = button,
+            imageWidth = imageWidth,
+            imageHeight = imageHeight,
+            geometryOf = { it.captureGeometry(imageWidth, imageHeight) },
+            hide = { it.hide() },
+        )
         val geometry: CaptureGeometry?
         var hiddenButton: CaptureOverlayButton? = null
-        if (button == null) {
-            geometry = null
-        } else {
-            val measured = button.captureGeometry(imageWidth, imageHeight)
-            if (measured == null) {
-                // どこを見ればよいか分からないまま「隠した」と判断しない。保存しない側に倒す。
+        when (concealed) {
+            is ConcealOutcome.Hidden -> {
+                geometry = concealed.geometry
+                hiddenButton = concealed.button
+            }
+            // 隠すボタンが無い（オーバーレイ未許可）。隠すものが無いので待たない。
+            ConcealOutcome.NoButton -> geometry = null
+            // どこを見ればよいか分からないまま「隠した」と判断しない。保存しない側に倒す。
+            ConcealOutcome.NoGeometry -> {
                 report("取得ボタンの位置を確認できないため保存しませんでした", notifyWithToast)
                 return
             }
-            if (!measured.rect.fitsIn(imageWidth, imageHeight)) {
+            ConcealOutcome.OutsideImage -> {
                 report("取得ボタンの画素を読めないため保存しませんでした", notifyWithToast)
                 return
             }
             // 隠せなかったら撮らない（隠れていないボタンが写った1枚を残さない）。
-            if (!button.hide()) {
+            ConcealOutcome.NotHidden -> {
                 report("取得ボタンを隠せなかったため保存しませんでした", notifyWithToast)
                 return
             }
-            geometry = measured
-            hiddenButton = button
         }
         // ---- ここまで suspend しない ----
         // 「隠し終えた時刻」。時刻は一次フィルタにだけ使う。
@@ -537,6 +577,12 @@ object CaptureController {
                 }
                 val (file, total) = stored
                 // 成功表示の直前にもう一度。PNG の圧縮と書き込みの間に停止し得る。
+                //
+                // ここで外れていたら**何もしない**（状態の文言も変えない）。ファイルはもう
+                // ディスクにあり、嘘になる「失敗」も、投影の話ではない「1枚保存しました」も
+                // 出せない。人が押した「停止」の一言を上書きしないことを優先する。書けた1枚は
+                // 次に一覧を読み直したとき（保存枚数の更新・画面に戻ったとき）に現れるので、
+                // 戻り値で呼出側に伝える相手もいない（呼出側はこの launch だけ）。
                 if (!isCurrent(frames)) {
                     Log.i(LOG_TAG, "capture: 書き込み中に停止したため成功表示をしません（${file.name}）")
                     return@launch
@@ -703,7 +749,8 @@ object CaptureController {
      * @param layoutGeneration いまのボタンの配置世代を読む関数。候補を読むのと同じ場所で
      *   読むので、隠している間に回転・再配置が起きていれば [Shot.Moved] になる。
      *   [CaptureOverlayButton.layoutGeneration] は `@Volatile` なので、この（Default 上の）
-     *   読み取りでも新しい値が見える。
+     *   読み取りでも新しい値が見える。隠している間も画面の変化の聞き手は生きているので
+     *   （[OverlayAttachment]）、この読み取りは回転を取りこぼさない。
      */
     private suspend fun takeShot(
         frames: FrameStore.Session<Image>,
