@@ -9,36 +9,49 @@ import org.junit.Test
 /**
  * ボタンが残っていた候補を捨て、次のフレームでやり直す（PR #22 の blocking 指摘）。
  *
- * `CaptureController.capture()` の繰り返し（待つ → 画素で確かめる → 駄目なら次）を、
+ * `CaptureController.capture()` の繰り返し（待つ → 配置と画素で確かめる → 駄目なら次）を、
  * 同じ順序の小さな台で固定する。時刻の一次フィルタだけでは、隠す前に合成された
  * ボタン入りのフレームを落とせない。
  */
 class VerifiedFrameGateTest {
 
     private val rect = PixelRect(964, 819, 8, 8)
+    private val imageWidth = 1080
+    private val imageHeight = 2400
+    private val generation = 3L
     private val background = 0xFF3A6EA5.toInt()
     private val burned = IntArray(rect.pixelCount) { 0xFF000000.toInt() }
     private val clean = IntArray(rect.pixelCount) { background }
 
-    private fun check() = OverlayPixelCheck(rect, IntArray(rect.pixelCount) { background })
+    private fun geometry() = CaptureGeometry(rect, generation, imageWidth, imageHeight)
 
-    /** Controller と同じ順序で「待つ → 画素で確かめる → 駄目なら次」を回す台。 */
-    private class Loop(plan: CapturePlan, check: OverlayPixelCheck?) {
-        private val gate = VerifiedFrameGate(plan, check)
+    /** Controller と同じ順序で「待つ → 配置と画素で確かめる → 駄目なら次」を回す台。 */
+    private class Loop(plan: CapturePlan, geometry: CaptureGeometry?) {
+        private val gate = VerifiedFrameGate(plan, geometry)
 
         var chosen: Long? = null
         var discarded = 0
             private set
+        var moved = 0
+            private set
 
         /** フレームが1枚届いた（保持は最新1枚だけ）。保存してよければ [chosen] が埋まる。 */
-        fun deliver(stamp: Long, pixels: IntArray?) {
-            if (chosen != null) return
+        fun deliver(
+            stamp: Long,
+            pixels: IntArray?,
+            layoutGeneration: Long = 3L,
+            width: Int = 1080,
+            height: Int = 2400,
+        ) {
+            if (chosen != null || moved > 0) return
             if (!gate.wants(stamp)) return
-            if (gate.keeps(pixels ?: IntArray(0))) {
-                chosen = stamp
-            } else {
-                gate.discard(stamp)
-                discarded += 1
+            when (gate.verdict(layoutGeneration, width, height, pixels)) {
+                CandidateVerdict.SAMPLED -> chosen = stamp
+                CandidateVerdict.BURNED -> {
+                    gate.discard(stamp)
+                    discarded += 1
+                }
+                CandidateVerdict.MOVED -> moved += 1
             }
         }
 
@@ -50,7 +63,7 @@ class VerifiedFrameGateTest {
     @Test
     fun burnedCandidateIsDiscardedAndNextFrameIsUsed() {
         val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
-        val loop = Loop(plan, check())
+        val loop = Loop(plan, geometry())
 
         // 隠す前に合成されたボタン入りのフレームが、隠した後の時刻で届いた。
         loop.deliver(1_050_000_000, burned)
@@ -66,7 +79,7 @@ class VerifiedFrameGateTest {
     @Test
     fun burnedFrameIsNotRetried() {
         val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
-        val loop = Loop(plan, check())
+        val loop = Loop(plan, geometry())
         val stamp = 1_050_000_000L
 
         loop.deliver(stamp, burned)
@@ -78,7 +91,7 @@ class VerifiedFrameGateTest {
     @Test
     fun onlyBurnedCandidatesNeverProduceCapture() {
         val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
-        val loop = Loop(plan, check())
+        val loop = Loop(plan, geometry())
 
         // パイプラインが遅れていて、ボタン入りのフレームが続けて届いた。
         loop.deliver(1_010_000_000, burned)
@@ -92,7 +105,7 @@ class VerifiedFrameGateTest {
     @Test
     fun frameComposedBeforeHideIsNotEvenChecked() {
         val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
-        val loop = Loop(plan, check())
+        val loop = Loop(plan, geometry())
 
         // hide 完了より前の時刻。画素を見るまでもなく候補にしない。
         loop.deliver(999_000_000, clean)
@@ -107,7 +120,7 @@ class VerifiedFrameGateTest {
         val colors = listOf(0xFFFFFFFF.toInt(), background, 0xFF101010.toInt())
         colors.forEach { color ->
             val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
-            val loop = Loop(plan, check())
+            val loop = Loop(plan, geometry())
 
             loop.deliver(1_050_000_000, IntArray(rect.pixelCount) { color })
 
@@ -120,7 +133,7 @@ class VerifiedFrameGateTest {
     fun withoutOverlayEveryFrameIsKept() {
         // 隠すボタンが無い（オーバーレイ未許可）。画素で比べる相手が無いので待たない。
         val plan = CapturePlan.forPress(hideCompletedAtNanos = null)
-        val loop = Loop(plan, check = null)
+        val loop = Loop(plan, geometry = null)
 
         assertFalse(loop.verifiesPixels)
         loop.deliver(5_000_000_000, burned)

@@ -24,19 +24,10 @@ internal data class PixelRect(val x: Int, val y: Int, val width: Int, val height
  * 押下時のフレームとの平均絶対差は使わない。下の画面が動いても、その差を「ボタンが
  * 消えた」証拠にすることはできないため。
  *
- * @param rect ボタンの矩形（画面の px）。
- * @param pressedRect 押下時の最新フレームから控えた矩形の画素（ARGB_8888、行優先）。
- *   位置と画素数を確かめるために受け取る。判定値との比較には使わない。
+ * @param rect ボタンの矩形（画面の px）。**隠す直前に読んだ実座標**を渡す
+ *   （[CaptureGeometry.rect]）。
  */
-internal class OverlayPixelCheck(
-    val rect: PixelRect,
-    pressedRect: IntArray,
-) {
-    init {
-        require(pressedRect.size == rect.pixelCount) {
-            "矩形の画素数 ${rect.pixelCount} と控えた画素 ${pressedRect.size} が合わない"
-        }
-    }
+internal class OverlayPixelCheck(val rect: PixelRect) {
 
     /**
      * 候補の矩形が非黒なら true（保存してよい）。黒い印なら false（次のフレームでやり直す）。
@@ -55,10 +46,12 @@ internal class OverlayPixelCheck(
         /**
          * 非黒と判断する平均輝度の下限（RGB 3 チャンネルの平均、0〜255）。3 未満は棄却する。
          *
-         * 根拠は実測した黒い印の完全な黒 (0, 0, 0)。PNG は可逆で圧縮による値の変動は無い。
-         * わずかな近黒だけを許容して 3 に切り上げ、それ以上の暗いグレーや色は保存対象にする。
-         * ボタンの下そのものが真っ黒な場合は区別できないため、600ms で中止して利用者に
-         * ボタンを動かすよう案内する（[CapturePlan.STALLED_MESSAGE]）。
+         * 根拠は実機で実測した黒い印の値で、セキュアな窓の矩形は**完全な黒 (0, 0, 0)** になる。
+         * 判定は PNG に詰める前の raw `Image` の画素で行うので、PNG が可逆であることは
+         * 根拠にならない（圧縮の前に決まる）。したがって 3 は実測値 0 に対する余裕として置く。
+         *
+         * 輝度 1〜2 の正常な暗い画面は保存できない。その場合は 600ms で中止し、黒い印が
+         * 消えない旨を人に知らせる（[CapturePlan.STALLED_MESSAGE]）。黙って保存はしない。
          */
         const val MIN_BUTTON_GONE_MEAN_BRIGHTNESS = 3.0
 
@@ -77,20 +70,25 @@ internal class OverlayPixelCheck(
 }
 
 /**
- * 候補フレームを保存してよいかの判定を持つ。**時刻は一次フィルタ、最終判断は黒い印。**
+ * 候補フレームを保存してよいかの判定を持つ。**時刻は一次フィルタ、最終判断は黒い印と配置。**
  *
- * `CaptureController.capture()` の繰り返し（待つ → 黒くないか確かめる → 駄目なら次）を、
+ * `CaptureController.capture()` の繰り返し（待つ → 配置と黒い印を確かめる → 駄目なら次）を、
  * `android.*` を持たずに JVM で再現できる形にしたもの。
  *
  * 捨てた候補の時刻を覚え、次は**それより新しいフレーム**だけを候補にする。同じ1枚を
  * 何度も見直して時間切れになるのを防ぐ。
+ *
+ * @param geometry 隠した時点の実座標・配置世代・画像寸法。null は「隠すボタンが無い」
+ *   ＝画素も配置も検査しない。
  */
 internal class VerifiedFrameGate(
     /** 時刻の一次フィルタ（隠し終えた後にキューされたか）。 */
     private val plan: CapturePlan,
-    /** 黒い印の最終判断。null は「隠すボタンが無い」＝検査しない。 */
-    private val pixels: OverlayPixelCheck?,
+    /** 隠した時点の配置。null は「隠すボタンが無い」＝検査しない。 */
+    private val geometry: CaptureGeometry?,
 ) {
+
+    private val pixels: OverlayPixelCheck? = geometry?.let { OverlayPixelCheck(it.rect) }
 
     /** 捨てた候補の次に受け付ける下限（ns）。まだ捨てていなければ null。 */
     private var resumeFromNanos: Long? = null
@@ -102,6 +100,9 @@ internal class VerifiedFrameGate(
     /** 黒い印を確かめる必要があるか（ボタンを隠したときだけ）。 */
     val verifiesPixels: Boolean get() = pixels != null
 
+    /** 候補から画素を読む矩形。ボタンが無ければ null。 */
+    val rect: PixelRect? get() = geometry?.rect
+
     /**
      * [timestampNanos] のフレームを候補にしてよいか。
      * 隠す前のフレームと、すでに捨てたフレームは候補にしない。
@@ -109,9 +110,32 @@ internal class VerifiedFrameGate(
     fun wants(timestampNanos: Long): Boolean =
         plan.accepts(timestampNanos) && timestampNanos >= sinceNanos
 
-    /** 候補の矩形の画素。true のときだけ保存してよい。 */
-    fun keeps(candidatePixels: IntArray): Boolean =
-        pixels?.isButtonGone(candidatePixels) ?: true
+    /**
+     * 候補1枚を判定する。
+     *
+     * **配置の確認を画素より先に行う。** 押した後にボタンが動いていれば、矩形の中を
+     * 見ても「ボタンが消えた」証拠にならない。逆に、旧矩形が非黒でも保存してはいけない
+     * （移動先に黒い印が残っている）。そのため位置・世代・寸法が食い違う候補は
+     * [CandidateVerdict.MOVED] にして、やり直さず取得ごと中止する。
+     *
+     * @param rectPixels 矩形の画素（読めなければ null）。
+     */
+    fun verdict(
+        layoutGeneration: Long,
+        imageWidth: Int,
+        imageHeight: Int,
+        rectPixels: IntArray?,
+    ): CandidateVerdict {
+        val geometry = geometry ?: return CandidateVerdict.SAMPLED
+        if (!geometry.stillDescribes(layoutGeneration, imageWidth, imageHeight)) {
+            return CandidateVerdict.MOVED
+        }
+        val check = pixels ?: return CandidateVerdict.SAMPLED
+        // 矩形が読めない（寸法が同じなのに収まらない）候補は保存しない側に倒し、次の1枚を見る。
+        val candidate = rectPixels ?: return CandidateVerdict.BURNED
+        if (candidate.size != check.rect.pixelCount) return CandidateVerdict.BURNED
+        return if (check.isButtonGone(candidate)) CandidateVerdict.SAMPLED else CandidateVerdict.BURNED
+    }
 
     /** 黒い印が残っていた候補を捨てる。次はこれより新しいフレームだけを見る。 */
     fun discard(timestampNanos: Long) {

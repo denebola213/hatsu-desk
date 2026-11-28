@@ -103,6 +103,16 @@ class CaptureOverlayButton(
     /** 画面に載っているか。外せなかった場合は true のまま残る（＝参照を捨てなくてよい）。 */
     val isAttached: Boolean get() = attachment.isAttached
 
+    /**
+     * ボタンの配置が変わるたびに増える番号。取得の途中でボタンが動いたかを見るために使う。
+     *
+     * 取得の判定は `Dispatchers.Default` で走るので、メインスレッド以外からも読む。
+     * 読む側が古い値を見ないよう `@Volatile` にする（増えるだけで、値そのものに意味は無い）。
+     */
+    @Volatile
+    internal var layoutGeneration: Long = 0L
+        private set
+
     /** 一度でも位置を決めたか。取得のたびに隠しても位置を忘れない。 */
     private var placed = false
 
@@ -158,7 +168,10 @@ class CaptureOverlayButton(
             y = position.y
         }
         val shown = attachment.attach()
-        if (!shown) {
+        if (shown) {
+            // 窓を載せ直した。位置が前回と違うことがあるので配置世代を進める。
+            layoutGeneration += 1
+        } else {
             // 権限が実行中に取り消された場合もここに来る。投影は止めない。
             Log.w(LOG_TAG, "取得ボタンを出せませんでした")
             // 出したが外せなかった View は、参照を失わないよう呼出側が持ち続ける。
@@ -180,14 +193,31 @@ class CaptureOverlayButton(
         button.parent != null || button.isAttachedToWindow || button.windowToken != null
 
     /**
-     * 画面上のボタンの矩形（px、左上が原点）。投影の絵と同じ座標系。
+     * 隠す直前に読む、**実 View の画面座標**・配置世代・投影画像の寸法。
      *
-     * 取得のとき、この矩形が投影フレームで黒く埋まっているかを確かめる（焼き付きの判定）。
-     * 画面に載っていなければ読めないので null。窓は `FLAG_LAYOUT_IN_SCREEN` と
-     * `Gravity.TOP or Gravity.START` なので、オフセットがそのまま画面座標になる。
+     * 論理 `position` ではなく、窓が実際に置かれている座標を読む。`updateViewLayout` が
+     * 失敗したときや、まだ反映されていないときに、論理値だけを証拠にすると黒い印の位置を
+     * 取り違えるため（PR #22 の blocking 指摘）。窓は `FLAG_LAYOUT_IN_SCREEN` と
+     * `Gravity.TOP or Gravity.START` なので、この座標がそのまま投影フレームの座標になる。
+     *
+     * **読んだら同じ main ターンの中で [hide] まで進むこと。** 途中で suspend すると、
+     * その間に main のドラッグや回転がボタンを動かせてしまう（[CaptureController.capture]）。
+     * 載っていない・大きさが 0 のときは位置の証拠にならないので null。
      */
-    internal fun boundsOnScreen(): PixelRect? =
-        if (attachment.isAttached) PixelRect(position.x, position.y, sizePx, sizePx) else null
+    internal fun captureGeometry(imageWidth: Int, imageHeight: Int): CaptureGeometry? {
+        if (!attachment.isAttached || !isOnScreen()) return null
+        val location = IntArray(2)
+        button.getLocationOnScreen(location)
+        val width = button.width
+        val height = button.height
+        if (width <= 0 || height <= 0) return null
+        return CaptureGeometry(
+            rect = PixelRect(location[0], location[1], width, height),
+            layoutGeneration = layoutGeneration,
+            imageWidth = imageWidth,
+            imageHeight = imageHeight,
+        )
+    }
 
     /**
      * 画面の大きさが変わった。ボタンが画面の外に残らないよう、位置を移し直す。
@@ -206,15 +236,24 @@ class CaptureOverlayButton(
             buttonHeight = sizePx,
         )
         screen = next
+        // 隠している間でも配置は変わる。取得中の候補は前の配置を前提にしているので、
+        // 世代を進めて「動いた」と分かるようにする（保存しない側に倒す）。
+        layoutGeneration += 1
         applyLayout()
     }
 
-    private fun applyLayout() {
-        if (!attachment.isAttached) return
-        val layout = params ?: return
+    private fun applyLayout(): Boolean {
+        if (!attachment.isAttached) return false
+        val layout = params ?: return false
         layout.x = position.x
         layout.y = position.y
-        runCatching { windowManager.updateViewLayout(button, layout) }
+        // 失敗を黙って捨てない。失敗したときは実際の位置が変わっていないので世代は進めない
+        // （位置の証拠は [captureGeometry] が実 View から読む）。
+        val applied = runCatching { windowManager.updateViewLayout(button, layout) }
+            .onFailure { Log.w(LOG_TAG, "取得ボタンの位置を反映できませんでした", it) }
+            .isSuccess
+        if (applied) layoutGeneration += 1
+        return applied
     }
 
     private fun currentScreen(): ScreenSize =

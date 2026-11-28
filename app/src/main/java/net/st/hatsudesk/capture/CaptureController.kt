@@ -383,23 +383,31 @@ object CaptureController {
      *
      * **`FLAG_SECURE` は焼き付きを消さない。** 実機ではボタン窓の矩形が投影フレームで
      * 完全な黒 (0, 0, 0) になる。この黒を「ボタンがまだ写っている」印に使う。
-     * 順序は、押下時の矩形を控える → 隠す → 候補を撮る → **矩形が非黒なのを確かめる**
-     * → 写し取る → 戻す。黒い候補は捨て、次のフレームでやり直す。
+     *
+     * **「矩形を決める」と「隠す」の間に何も挟まない。** 旧い手順は矩形を控えてから
+     * suspend を跨いで隠していたため、その間に main のドラッグや回転がボタンを
+     * **同じ大きさのまま**動かせた。すると旧矩形（非黒）を見て「消えた」と判断し、
+     * 移動先の黒い印を残したフレームを保存してしまう（PR #22 の blocking 指摘）。
+     * いまは実 View の座標・配置世代・画像寸法を読み、**同じ main ターンの中で**隠し、
+     * その組（[CaptureGeometry]）と食い違う候補は保存しない。
+     *
+     * 順序は次のとおり。
+     * 1. 押した時点の実座標・配置世代・画像寸法を確定する（suspend しない）
+     * 2. 続けて隠す（同じ main ターン）。隠せなかったら保存しない
+     * 3. 隠し終えた時刻より後にキューされた候補だけを待つ
+     * 4. 候補の配置（世代・寸法）が 1. と違えば**中止**（保存しない・やり直さない）
+     * 5. 同じ配置なら、矩形の平均輝度が 3 以上＝非黒なら保存。3 未満＝黒い印が
+     *    残っているので捨て、次のフレームでやり直す（[VerifiedFrameGate]）
+     * 6. [CaptureDeadline.TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
+     * 7. 写し取った後・書き込みの後に、世代と実行状態を**もう一度**確かめる（下記）
+     *
+     * 下の画面そのものが真っ黒なら、ボタンを隠した後も黒いままになる。この場合も保存せず、
+     * 時間切れの文言でボタンを動かすよう人に知らせる。下の絵の変化との差は判定に使わない。
      *
      * **時刻では焼き付きを証明できない。** `Image.getTimestamp()` は合成時刻ではなく、
      * 最後の sink へ `queueBuffer()` した時刻なので、隠す前に合成された絵が隠した後に
      * キューされれば「隠した後」の時刻を持つ。時刻は候補を絞る一次フィルタにだけ使い、
      * **保存してよいかの最終判断は候補の黒い印**（[OverlayPixelCheck]）で行う。
-     *
-     * 1. 押した瞬間の最新フレームから、ボタンの矩形の画素を控える
-     * 2. 隠す（現行の手順のまま）
-     * 3. 候補フレームの同じ矩形を読む
-     * 4. 平均輝度が 3 以上＝非黒なら保存。3 未満＝まだ黒い印が写っているので捨てる
-     * 5. 捨てたら次のフレームでやり直す（[VerifiedFrameGate]）
-     * 6. [CaptureDeadline.TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
-     *
-     * 下の画面そのものが真っ黒なら、ボタンを隠した後も黒いままになる。この場合も保存せず、
-     * 時間切れの文言でボタンを動かすよう人に知らせる。下の絵の変化との差は判定に使わない。
      *
      * 隠すボタンが無い（オーバーレイ未許可）ときは隠すものが無いので、待たずに最新1枚を
      * そのまま保存する。静止した画面では新しいフレームが来ないので、待つと必ず失敗する。
@@ -420,59 +428,66 @@ object CaptureController {
         }
 
         val button = overlayCleanup.peek()
-        // 画素で比べる矩形。ボタンが画面に載っていなければ読めない。
-        val rect = button?.boundsOnScreen()
-        if (button != null && rect == null) {
-            // どこを見ればよいか分からないまま「隠した」と判断しない。保存しない側に倒す。
-            report("取得ボタンの位置を確認できないため保存しませんでした", notifyWithToast)
-            return
+        val imageWidth = reader?.width ?: 0
+        val imageHeight = reader?.height ?: 0
+        // ---- ここから hide まで suspend しない（同じ main ターンで終える） ----
+        // 位置の証拠は実 View の座標と配置世代。隠す前に確定させる。
+        val geometry: CaptureGeometry?
+        var hiddenButton: CaptureOverlayButton? = null
+        if (button == null) {
+            geometry = null
+        } else {
+            val measured = button.captureGeometry(imageWidth, imageHeight)
+            if (measured == null) {
+                // どこを見ればよいか分からないまま「隠した」と判断しない。保存しない側に倒す。
+                report("取得ボタンの位置を確認できないため保存しませんでした", notifyWithToast)
+                return
+            }
+            if (!measured.rect.fitsIn(imageWidth, imageHeight)) {
+                report("取得ボタンの画素を読めないため保存しませんでした", notifyWithToast)
+                return
+            }
+            // 隠せなかったら撮らない（隠れていないボタンが写った1枚を残さない）。
+            if (!button.hide()) {
+                report("取得ボタンを隠せなかったため保存しませんでした", notifyWithToast)
+                return
+            }
+            geometry = measured
+            hiddenButton = button
         }
-
-        capturing = true
+        // ---- ここまで suspend しない ----
+        // 「隠し終えた時刻」。時刻は一次フィルタにだけ使う。
+        val hideCompletedAtNanos = if (hiddenButton != null) System.nanoTime() else null
+        val hiddenAt = SystemClock.elapsedRealtime()
         val pressedAt = SystemClock.elapsedRealtime()
 
+        capturing = true
         scope.launch {
             // 隠せたときだけ戻す。隠せていない（状態が不確かな）ときに show() を呼ぶと、
             // 画面に残っている View へ addView してしまい、かえって消すことになる。
-            var pendingRestore: CaptureOverlayButton? = null
+            var pendingRestore: CaptureOverlayButton? = hiddenButton
             try {
-                // 1. 押した瞬間の最新フレームから、ボタンの矩形の画素を控える。
-                //    まだ隠していないので、この1枚にはボタンが写っている。
-                val pressedRect = if (rect != null) grabRect(frames, rect) else null
-                if (rect != null && pressedRect == null) {
-                    val text = "取得ボタンの画素を読めないため保存しませんでした"
-                    setMessage(text)
-                    if (notifyWithToast) toast(text)
-                    return@launch
-                }
-                // 2. 隠す。隠せなかったら撮らない（隠れていないボタンが写った1枚を残さない）。
-                val hidden = button?.hide() ?: true
-                pendingRestore = if (hidden) button else null
-                if (!hidden) {
-                    val text = "取得ボタンを隠せなかったため保存しませんでした"
-                    setMessage(text)
-                    if (notifyWithToast) toast(text)
-                    return@launch
-                }
-                // ここが「隠し終えた時刻」。時刻は一次フィルタにだけ使う。
-                val hideCompletedAtNanos = if (button != null) System.nanoTime() else null
-                val hiddenAt = SystemClock.elapsedRealtime()
                 val plan = CapturePlan.forPress(hideCompletedAtNanos)
-                val check = if (rect != null && pressedRect != null) OverlayPixelCheck(rect, pressedRect) else null
-                val gate = VerifiedFrameGate(plan, check)
+                val gate = VerifiedFrameGate(plan, geometry)
                 val deadline = CaptureDeadline(hiddenAt)
 
-                // 3〜6. 候補を撮り、画素で確かめ、駄目なら次のフレームでやり直す。
+                // 3〜6. 候補を撮り、配置と画素で確かめ、駄目なら次のフレームでやり直す。
                 var snapshot: Bitmap? = null
                 var discarded = 0
+                var moved = false
                 while (snapshot == null) {
                     val remaining = deadline.remainingMillis(SystemClock.elapsedRealtime())
                     if (remaining <= 0) break
                     // 条件を満たす候補がすでにあれば first はその場で返る。
                     val woke = withTimeoutOrNull(remaining) { frames.stamp.first { gate.wants(it) } }
                     if (woke == null) break
-                    when (val shot = takeShot(frames, gate, rect)) {
+                    val shot = takeShot(frames, gate) { hiddenButton?.layoutGeneration ?: 0L }
+                    when (shot) {
                         null -> break // 世代が変わった（停止→再開）。古いフレームは使わない。
+                        Shot.Moved -> {
+                            moved = true
+                            break
+                        }
                         is Shot.Burned -> {
                             gate.discard(shot.stampNanos)
                             discarded += 1
@@ -485,7 +500,19 @@ object CaptureController {
                 pendingRestore = null
                 val grabbedAt = SystemClock.elapsedRealtime()
 
-                if (snapshot == null) {
+                if (moved) {
+                    // 押した後にボタンが動いた（回転・再配置）。どの矩形を見ればよいかの
+                    // 証拠が崩れているので、同じ取得を続けても当てにならない。保存しない。
+                    if (session.isRunning) {
+                        val text = "取得ボタンが動いたため保存しませんでした。もう一度お試しください"
+                        setMessage(text)
+                        if (notifyWithToast) toast(text)
+                    }
+                    Log.w(LOG_TAG, "capture: ボタンが動いたため中止（捨てた候補=$discarded）")
+                    return@launch
+                }
+                val taken = snapshot
+                if (taken == null) {
                     // 隠した後のフレームが来なかったか、来てもボタンが残っていた。保存しない。
                     // 途中で停止された場合は、停止の一言を上書きしない（投影の話ではない）。
                     if (session.isRunning) {
@@ -495,13 +522,25 @@ object CaptureController {
                     Log.w(LOG_TAG, "capture: 焼き付きを排除できず中止（捨てた候補=$discarded）")
                     return@launch
                 }
-                val stored = storeFrame(snapshot)
+                // 写し取った後、保存する前にもう一度確かめる。コピーの間に停止していれば
+                // 保存しない（停止の一言を「1枚保存しました」で上書きしない）。
+                if (!isCurrent(frames)) {
+                    taken.recycle()
+                    Log.i(LOG_TAG, "capture: コピー中に停止したため保存しません")
+                    return@launch
+                }
+                val stored = storeFrame(taken)
                 val totalMs = SystemClock.elapsedRealtime() - pressedAt
                 if (stored == null) {
                     if (notifyWithToast) toast("保存に失敗しました")
                     return@launch
                 }
                 val (file, total) = stored
+                // 成功表示の直前にもう一度。PNG の圧縮と書き込みの間に停止し得る。
+                if (!isCurrent(frames)) {
+                    Log.i(LOG_TAG, "capture: 書き込み中に停止したため成功表示をしません（${file.name}）")
+                    return@launch
+                }
                 Log.i(
                     LOG_TAG,
                     "capture: press→hidden=${hiddenAt - pressedAt}ms, " +
@@ -637,41 +676,49 @@ object CaptureController {
     private sealed interface Shot {
         class Taken(val bitmap: Bitmap, val stampNanos: Long) : Shot
         class Burned(val stampNanos: Long) : Shot
+
+        /**
+         * 押した時点と配置（世代・寸法）が変わった。保存せず、やり直しもしない
+         * （[CandidateVerdict.MOVED]）。
+         */
+        data object Moved : Shot
     }
 
     /**
-     * ボタンの矩形の画素を、押した瞬間の最新フレームから控える。
-     * 矩形の位置と画素数を確かめるためのもので、候補との差分比較には使わない。
-     * 矩形が画像に収まらない・フレームが無いときは null。
+     * 取得の対象にした世代と実行状態が、まだそのままか。
+     *
+     * 写し取った後や書き込みの後に、停止・失効・停止→再開が起きていないかを確かめる。
+     * 停止していたら保存しない（停止の一言を成功表示で上書きしない）。
      */
-    private suspend fun grabRect(frames: FrameStore.Session<Image>, rect: PixelRect): IntArray? =
-        withContext(Dispatchers.Default) {
-            frameStore.withLatest(frames) { image -> image.copyRectArgb(rect) }
-        }
+    private fun isCurrent(frames: FrameStore.Session<Image>): Boolean =
+        session.isRunning && frameStore.isCurrent(frames)
 
     /**
-     * 候補フレームを1枚取り、**保存してよいかを黒い印で確かめる**。バッファは消費しない。
+     * 候補フレームを1枚取り、**保存してよいかを配置と黒い印で確かめる**。バッファは消費しない。
      *
      * 矩形の平均輝度が 3 以上なら [Shot.Taken]（全体を Bitmap に写す）。3 未満なら
-     * [Shot.Burned]。Bitmap への写しは判断が通った1枚だけでよい。
+     * [Shot.Burned]。押した時点と配置が違えば [Shot.Moved]。Bitmap への写しは判断が
+     * 通った1枚だけでよい。
+     *
+     * @param layoutGeneration いまのボタンの配置世代を読む関数。候補を読むのと同じ場所で
+     *   読むので、隠している間に回転・再配置が起きていれば [Shot.Moved] になる。
+     *   [CaptureOverlayButton.layoutGeneration] は `@Volatile` なので、この（Default 上の）
+     *   読み取りでも新しい値が見える。
      */
     private suspend fun takeShot(
         frames: FrameStore.Session<Image>,
         gate: VerifiedFrameGate,
-        rect: PixelRect?,
+        layoutGeneration: () -> Long,
     ): Shot? = withContext(Dispatchers.Default) {
         frameStore.withLatestAfter(frames, gate.sinceNanos) { image ->
             val stamp = image.timestamp
-            if (rect == null) {
-                Shot.Taken(image.copyToBitmap(), stamp)
-            } else {
-                val candidate = image.copyRectArgb(rect)
-                // 矩形が読めない（画面の大きさが変わった等）ときは保存しない側に倒す。
-                if (candidate == null || !gate.keeps(candidate)) {
-                    Shot.Burned(stamp)
-                } else {
-                    Shot.Taken(image.copyToBitmap(), stamp)
-                }
+            val rect = gate.rect
+            val candidate = if (rect != null) image.copyRectArgb(rect) else null
+            val verdict = gate.verdict(layoutGeneration(), image.width, image.height, candidate)
+            when (verdict) {
+                CandidateVerdict.SAMPLED -> Shot.Taken(image.copyToBitmap(), stamp)
+                CandidateVerdict.BURNED -> Shot.Burned(stamp)
+                CandidateVerdict.MOVED -> Shot.Moved
             }
         }
     }
