@@ -6,7 +6,7 @@ SilverBullet（notes.st-albireo.net）にも同じ内容の写しがある。読
 
 ## 文書
 
-- [設計 v0.8](design/01-ranking-deck-viewer.md) — 現在の姿。上書きして育てる
+- [設計 v0.9](design/01-ranking-deck-viewer.md) — 現在の姿。上書きして育てる
 - [ビルド環境](build-environment.md) — コンテナと固定している版
 
 ## ADR
@@ -16,7 +16,7 @@ SilverBullet（notes.st-albireo.net）にも同じ内容の写しがある。読
 | # | 決定 |
 | --- | --- |
 | [0001](adr/0001-no-screenshot-share.md) | 収集の主経路にスクショ共有を用いない（一部置換） |
-| [0002](adr/0002-recording-and-overlay-button.md) | 取得は画面録画とオーバーレイボタンを既定にする |
+| [0002](adr/0002-recording-and-overlay-button.md) | 取得は画面録画とオーバーレイボタンを既定にする（焼き付き対策は ADR 0012 で一部置換） |
 | [0003](adr/0003-support-by-combination.md) | サポートは組み合わせで集計する |
 | [0004](adr/0004-document-oriented-storage.md) | 永続化は文書指向にする |
 | [0005](adr/0005-build-in-rootless-podman.md) | ビルド環境はホストの rootless podman に置き、常駐させない |
@@ -26,6 +26,7 @@ SilverBullet（notes.st-albireo.net）にも同じ内容の写しがある。読
 | [0009](adr/0009-card-dictionary-grown-by-capture.md) | カード辞書は同梱せず、詳細撮影で育てる |
 | [0010](adr/0010-enforce-no-internet.md) | 通信権限を持たないことをビルドで強制する |
 | [0011](adr/0011-core-stays-within-android-api.md) | `:core` で使う JDK API を Android の API 水準に収める |
+| [0012](adr/0012-overlay-burn-in-black-marker.md) | オーバーレイの焼き付きは `FLAG_SECURE` の黒い印と hide で排除する |
 
 ## 読み方
 
