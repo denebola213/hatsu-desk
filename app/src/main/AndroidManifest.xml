@@ -6,10 +6,12 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 投影の常駐通知と前面サービス（設計 §4.1）。SYSTEM_ALERT_WINDOW は M1-b。 -->
+    <!-- 投影の常駐通知と前面サービス（設計 §4.1）。オーバーレイの取得ボタン（M1-b）。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 取得ボタンを他のアプリの上に出す。許可は利用者が設定画面で行う。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"

@@ -2,8 +2,13 @@ package net.st.hatsudesk.ui
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -39,8 +44,12 @@ private const val NOTIFICATION_DENIED_NOTICE =
         "停止はこの画面の「投影を停止」から行えます。"
 
 /**
- * M1-a の暫定画面。設計 §4.1 の「常時バッファ＋取得ボタン」のうち、オーバーレイではなく
- * アプリの画面にボタンを置いたもの（M1-b でオーバーレイへ移す）。
+ * 投影の画面。設計 §4.1 の「常時バッファ＋取得ボタン」。
+ *
+ * 取得ボタンは投影中だけ画面の上（オーバーレイ）に出る。ここはその準備として
+ * `SYSTEM_ALERT_WINDOW` の許可状態を見せ、設定画面へ送るだけ。**許可を押すのは人**で、
+ * アプリから許可を与えることはできない（`SYSTEM_ALERT_WINDOW` に runtime の request は無い）。
+ * 許可しなくても投影はできる。その場合はこの画面の「いまのフレームを1枚保存」を使う。
  *
  * **同意ダイアログは OS のもの**で、押すのは人間。ここは `createScreenCaptureIntent()` を
  * 起動するだけで、同意そのものを代行しない（設計 §4・§12）。
@@ -81,6 +90,10 @@ fun ProjectionScreen(onBack: () -> Unit) {
     // そのまま同意へ進む（投影を止められない状態を作らない）。理由と影響は開始前に見せる。
     var notificationDenied by remember { mutableStateOf(!notificationPermissionGranted(context)) }
 
+    // オーバーレイの許可は設定画面で人が与える。アプリからは要求できないので、状態を見せるだけ。
+    var overlayAllowed by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var overlaySettingsFailed by remember { mutableStateOf(false) }
+
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         notificationDenied = !granted
         if (waitingForNotification) {
@@ -95,7 +108,10 @@ fun ProjectionScreen(onBack: () -> Unit) {
     // ファイルが消えたときに「保存した枚数」がずれ、通知を後から許可しても説明が残る。
     LifecycleResumeEffect(context) {
         CaptureController.refreshSavedCount()
+        // 停止時に外せなかったボタンがあれば、ここで外し直す（投影中は何もしない）。
+        CaptureController.retryOverlayRemoval()
         notificationDenied = !notificationPermissionGranted(context)
+        overlayAllowed = Settings.canDrawOverlays(context)
         onPauseOrDispose {}
     }
 
@@ -111,6 +127,7 @@ fun ProjectionScreen(onBack: () -> Unit) {
             Field("フレーム", if (state.hasFrame) "あり（最新1枚を保持）" else "なし")
             Field("保存した枚数", "${state.savedCount} 枚")
             state.lastCapture?.let { Field("最後に保存したファイル", it) }
+            state.lastCaptureMs?.let { Field("取得にかかった時間", "${it} ms") }
             state.message?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium)
@@ -118,6 +135,27 @@ fun ProjectionScreen(onBack: () -> Unit) {
             if (notificationDenied) {
                 Spacer(Modifier.height(8.dp))
                 Text(NOTIFICATION_DENIED_NOTICE, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            SectionTitle("オーバーレイ")
+            Field("取得ボタン", if (overlayAllowed) "許可済み（投影中は画面の上に出ます）" else "未許可")
+            if (!overlayAllowed) {
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { overlaySettingsFailed = !openOverlaySettings(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("オーバーレイを許可（設定を開く）") }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (overlaySettingsFailed) {
+                        "設定を開けませんでした。端末の設定 →「アプリ」→「構成ビューア」→" +
+                            "「他のアプリの上に重ねて表示」から許可してください。"
+                    } else {
+                        "設定の「他のアプリの上に重ねて表示」をオンにすると、投影中に取得ボタンが" +
+                            "出ます。許可するかどうかは設定画面で選べます（許可しなくても投影はできます）。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             SectionTitle("操作")
@@ -164,6 +202,23 @@ fun ProjectionScreen(onBack: () -> Unit) {
             )
             Spacer(Modifier.height(24.dp))
         }
+    }
+}
+
+/**
+ * オーバーレイの許可画面（OS の設定）を開く。**許可そのものは押さない。**
+ * 機種によっては画面が無いので、開けなかったら false を返して画面に案内を出す。
+ */
+private fun openOverlaySettings(context: Context): Boolean {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:${context.packageName}"),
+    )
+    return try {
+        context.startActivity(intent)
+        true
+    } catch (error: ActivityNotFoundException) {
+        false
     }
 }
 
