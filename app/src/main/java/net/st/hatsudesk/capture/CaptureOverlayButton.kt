@@ -29,6 +29,11 @@ import kotlin.math.roundToInt
  * ゲームの操作を壊さないための約束:
  * - `FLAG_NOT_FOCUSABLE` … キー入力もフォーカスも奪わない。ボタンの外のタッチはそのまま
  *   下のアプリへ抜ける（`FLAG_NOT_TOUCH_MODAL`）。ボタンの上だけは自分が受け取る
+ * - **`FLAG_SECURE` … この窓をスクリーンショットと `MediaProjection` の出力から外す。**
+ *   SurfaceFlinger は投影（`VirtualDisplay` の複製）を作るとき、セキュアな層を描かない。
+ *   効けば保存した PNG にボタンは写らない。効くかどうかは実機で確かめる段階で、
+ *   いまは隠す・待つ・画素で見る処理（[CaptureController]）と併存させて比較する。
+ *   値は [OverlayWindowFlags]（android 非依存の置き場。理由はそちらの説明）
  * - 見た目は円ひとつ。影もカードも無い。押している間だけ少し濃くする
  *
  * 位置は [OverlayPosition] が持ち、ドラッグで動き、離すと左右の近い端へ寄る。
@@ -146,9 +151,7 @@ class CaptureOverlayButton(
             sizePx,
             sizePx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            OverlayWindowFlags.WINDOW_FLAGS,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
