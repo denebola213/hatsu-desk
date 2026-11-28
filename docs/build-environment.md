@@ -57,8 +57,8 @@ v1 では `/workspace/scratch/android-build/` に仮置きしていたが、リ�
 ## 使い方
 
 ```bash
-# desktop 上で（Hermes からは ssh 越し）
-podman build --squash -t localhost/android-build:agp9.5-sdk37 build/
+# desktop 上で（Hermes からは ssh 越し）。Containerfile は container/ にある
+podman build --squash -t localhost/android-build:agp9.5-sdk37 container/
 scripts/abuild.sh assembleDebug
 scripts/abuild.sh lint testDebugUnitTest
 ```
