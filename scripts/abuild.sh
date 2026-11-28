@@ -23,8 +23,9 @@ TASKS=("$@")
 
 # 鍵はリポジトリの外に置く。コンテナの ANDROID_USER_HOME=/root/.android に
 # このディレクトリを丸ごと当てるので、鍵は $KEYSTORE_DIR/debug.keystore に残る。
-case "$(cd "$(dirname "$KEYSTORE_DIR")" && pwd)/$(basename "$KEYSTORE_DIR")" in
-  "$PROJ"/*) echo "NG: 鍵の置き場がリポジトリの中: $KEYSTORE_DIR" >&2; exit 1 ;;
+# realpath -m はディレクトリが未作成でも正規化する（作成前に判定したい）。
+case "$(realpath -m "$KEYSTORE_DIR")" in
+  "$(realpath -m "$PROJ")"/*) echo "NG: 鍵の置き場がリポジトリの中: $KEYSTORE_DIR" >&2; exit 1 ;;
 esac
 mkdir -p "$KEYSTORE_DIR"
 chmod 700 "$KEYSTORE_DIR"
