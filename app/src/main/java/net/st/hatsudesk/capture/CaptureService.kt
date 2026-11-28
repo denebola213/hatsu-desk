@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
@@ -148,6 +149,17 @@ class CaptureService : Service() {
         // サービスが消えるなら投影も終える（通知からも OS からも来ない経路の保険）。
         CaptureController.stop("投影を終了しました")
         super.onDestroy()
+    }
+
+    /**
+     * 画面の回転。オーバーレイのボタンは Activity の一部ではないので、ここでも位置を
+     * 移し直す。**これは補助で、これに依存しない。** ボタン自身の [DisplayManager] の
+     * 聞き手はセッションの間ずっと生きており、取得のため隠している間の回転も受け取る
+     * （サービスが構成変更を受け取れるかどうかに関係なく、取得は古い矩形で判定しない）。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        CaptureController.onConfigurationChanged()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
