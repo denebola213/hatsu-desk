@@ -140,6 +140,8 @@ podman run --rm -v "$PWD:/work:Z" -w /work localhost/android-build:agp9.5-sdk37 
 
 ## 検証結果
 
+2026-11-28 / 署名鍵の共有（Issue #17）を入れた状態で `clean assembleDebug` を 2 回。署名証明書 `SHA-256` は 2 回とも `a1f13856cc97ec86ed9c51b3f0a3bffbe2708a335a93f6153b4d27c8dd6c3833`、APK の `sha256sum` も一致した。鍵の mtime とハッシュは 2 回目で変わらず（＝作り直されていない）。修正前の `abuild.sh` で同じことをすると 2 回で別の指紋（`1689b10a…` / `8d169554…`）になった。
+
 `assembleDebug` が 21 秒で通り、APK が出た。
 
 ```
