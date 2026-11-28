@@ -17,6 +17,7 @@ captures/
 *.keystore
 *.jks
 *.p12
+*.pfx
 
 # 署名鍵の置き場（Issue #17）。鍵はここに置くが、リポジトリには入れない。
 # ビルドは $HOME/.android/hatsu-desk を使う。これはリポジトリ内に落とした場合の保険。

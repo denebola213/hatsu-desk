@@ -48,7 +48,8 @@ Red Hat の podman-in-podman の記事が前提にする `--privileged`（また
 | `container/Containerfile`（リポジトリ内） | イメージ定義。版はここが唯一の出所 |
 | `scripts/abuild.sh` | ビルド実行（`--rm`）。署名鍵の作成とマウントもここ |
 | `scripts/check-no-internet.sh` | `INTERNET` 権限の混入検査 |
-| `scripts/check-keystore-not-tracked.sh` | 署名鍵が git に入っていないことの検査 |
+| `scripts/check-keystore-not-tracked.sh` | 署名鍵が git に入っていないことの検査（直接実行できる） |
+| `scripts/test-abuild-keystore-guard.sh` | 鍵置き場のガードと鍵の権限のテスト（podman 不要） |
 | desktop `~/containers/android-build/Containerfile` | ビルド時にリポジトリから複製した実体 |
 | desktop `~/.android/hatsu-desk/debug.keystore` | debug 署名鍵。**リポジトリの外**（下記） |
 
@@ -78,9 +79,29 @@ scripts/abuild.sh lint testDebugUnitTest
 | 別名 | `androiddebugkey` |
 | パスワード（store / key） | `android` / `android` |
 | 鍵 | RSA 2048、有効 10000 日、`CN=Android Debug,O=Android,C=US` |
-| git | 追跡しない（`.gitignore` の `*.keystore` / `/.android/`） |
+| 権限 | ディレクトリ `700`、`debug.keystore` `600` |
+| git | 追跡しない（`.gitignore` の `*.keystore` / `*.jks` / `*.p12` / `*.pfx` / `/.android/`） |
 
 鍵は debug 用の共有鍵なので秘密ではないが、リポジトリに入れると「どのビルドも同じ鍵」であることが repo の外から見えなくなる／別の用途に流用されうる。**入れない**運用にし、入っていないことを `scripts/check-keystore-not-tracked.sh` で検査する。
+
+### 置き場のガード
+
+`scripts/abuild.sh` は `ABUILD_KEYSTORE_DIR` が**リポジトリの中を指したら実行前に止まる**（`exit 1`）。
+
+- 子孫（`$PWD/keystore` など）だけでなく、**リポジトリ直下と等しい場合も拒否する**。等値を許すと `-v "$KEYSTORE_DIR:/root/.android"` でリポジトリ全体がコンテナの `/root/.android` として RW マウントされる
+- リポジトリを指すシンボリックリンクも、既存なら `realpath -e` で解決してから判定する
+- 鍵を作ったあとは**新規生成・既存のどちらでも `debug.keystore` を `600`** にする（`keytool` は umask のまま 644 で作るため）
+
+この判定と権限は `scripts/test-abuild-keystore-guard.sh` が固定する（`podman` をスタブに差し替えるので、イメージもコンテナも要らない）。
+
+### 検査
+
+```bash
+scripts/check-keystore-not-tracked.sh     # 追跡・無視されていない鍵が無いこと
+scripts/test-abuild-keystore-guard.sh     # 置き場のガードと権限
+```
+
+検査は追跡済みの鍵（`*.keystore` / `*.jks` / `*.p12` / `*.pfx`）と、作業ツリーにあって `.gitignore` で無視されていない鍵の両方を見る。追跡されていなければ `.gitignore` に載っていることまで確かめる（載っていない＝次の `git add .` で入りうる）。
 
 ### 作る（初回だけ）
 
@@ -130,8 +151,11 @@ podman run --rm -v "$HOME/.android/hatsu-desk:/root/.android:Z" \
 scripts/abuild.sh assembleDebug          # 1 回目
 cp app/build/outputs/apk/debug/app-debug.apk /tmp/apk1.apk
 scripts/abuild.sh clean assembleDebug    # 2 回目（鍵が残っているかを見る）
-podman run --rm -v "$PWD:/work:Z" -w /work localhost/android-build:agp9.5-sdk37 \
-  apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk
+# apksigner は build-tools の中にあり、イメージの PATH には無い
+podman run --rm -v "$PWD:/work:Z" -w /work localhost/android-build:agp9.5-sdk37 bash -lc '
+  apksigner=$(ls -1 /opt/android-sdk/build-tools/*/apksigner | sort -V | tail -1)
+  "$apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
+'
 ```
 
 `certificate SHA-256 digest` が 1 回目と 2 回目で一致すればよい（build-tools 37 の apksigner は `V2 Signer: certificate SHA-256 digest: ...` と出す）。`scripts/abuild.sh` もビルドの最後にこの行を出す。
@@ -141,6 +165,8 @@ podman run --rm -v "$PWD:/work:Z" -w /work localhost/android-build:agp9.5-sdk37 
 ## 検証結果
 
 2026-11-28 / 署名鍵の共有（Issue #17）を入れた状態で `clean assembleDebug` を 2 回。署名証明書 `SHA-256` は 2 回とも `a1f13856cc97ec86ed9c51b3f0a3bffbe2708a335a93f6153b4d27c8dd6c3833`、APK の `sha256sum` も一致した。鍵の mtime とハッシュは 2 回目で変わらず（＝作り直されていない）。修正前の `abuild.sh` で同じことをすると 2 回で別の指紋（`1689b10a…` / `8d169554…`）になった。
+
+2026-11-28 / PR #23 の指摘対応（リポジトリ直下の拒否・鍵の `600`・`*.pfx` の検査）を入れて `clean assembleDebug` を 2 回。署名証明書 `SHA-256` は 2 回とも `a1f13856cc97ec86ed9c51b3f0a3bffbe2708a335a93f6153b4d27c8dd6c3833`、APK の `sha256sum` も 2 回とも `ab0f0428…` で一致した。鍵は 1 回目で `644 → 600` になり、2 回目も `600` のまま（`== debug keystore を作る ==` はどちらにも出ない＝作り直されていない）。`ABUILD_KEYSTORE_DIR=$PWD` は `exit 1`、`scripts/check-keystore-not-tracked.sh` は直接実行で `OK`、`scripts/test-abuild-keystore-guard.sh` は 9 件すべて ok。
 
 `assembleDebug` が 21 秒で通り、APK が出た。
 

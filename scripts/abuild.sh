@@ -24,8 +24,21 @@ TASKS=("$@")
 # 鍵はリポジトリの外に置く。コンテナの ANDROID_USER_HOME=/root/.android に
 # このディレクトリを丸ごと当てるので、鍵は $KEYSTORE_DIR/debug.keystore に残る。
 # realpath -m はディレクトリが未作成でも正規化する（作成前に判定したい）。
-case "$(realpath -m "$KEYSTORE_DIR")" in
-  "$(realpath -m "$PROJ")"/*) echo "NG: 鍵の置き場がリポジトリの中: $KEYSTORE_DIR" >&2; exit 1 ;;
+KEYSTORE_REAL="$(realpath -m "$KEYSTORE_DIR")"
+PROJ_REAL="$(realpath -m "$PROJ")"
+# 既にあればシンボリックリンクも解決する（リポジトリを指すリンクを外から渡されても防ぐ）。
+if [ -e "$KEYSTORE_DIR" ]; then
+  KEYSTORE_REAL="$(realpath -e "$KEYSTORE_DIR")"
+fi
+
+# 子孫だけでなく**等しい場合も**拒否する。等値を許すとリポジトリ全体が
+# コンテナの /root/.android として RW マウントされ、鍵置き場のつもりで
+# 作業ツリーを丸ごと渡すことになる。
+case "$KEYSTORE_REAL" in
+  "$PROJ_REAL" | "$PROJ_REAL"/*)
+    echo "NG: 鍵の置き場がリポジトリの中: $KEYSTORE_DIR" >&2
+    exit 1
+    ;;
 esac
 mkdir -p "$KEYSTORE_DIR"
 chmod 700 "$KEYSTORE_DIR"
@@ -45,6 +58,11 @@ if [ ! -f "$KEYSTORE_DIR/debug.keystore" ]; then
       -keyalg RSA -keysize 2048 -validity 10000 \
       -dname "CN=Android Debug,O=Android,C=US"
 fi
+
+# 新規生成・既存のどちらでも 600 にする。鍵は本人だけが読めればよい。
+# keytool は umask のまま（644）で作るので、生成直後と旧版が残した既存鍵の
+# 両方をここで締める。ディレクトリは 700 なので、鍵単体も 600 に揃える。
+chmod 600 "$KEYSTORE_DIR/debug.keystore"
 
 podman run --rm \
   -v "$PROJ:/work:Z" \
