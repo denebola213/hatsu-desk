@@ -86,14 +86,6 @@ object CaptureController {
     /** 最新1枚と、書き込み中の1枚を同時に持てれば足りる。 */
     private const val MAX_IMAGES = 2
 
-    /**
-     * ボタンを隠してから、隠した後のフレームが届くのを待つ上限。
-     * **固定の撮影待ちではない。** 待つのはフレームの到着で、通常は次の1枚（60Hz で約17ms）。
-     * ここは「合成が止まっている」と判断して諦めるまでの時間で、諦めたら保存はしない。
-     * 条件は「隠した後に合成された1枚」。2枚目は待たない（待つほど押下時から絵がずれる）。
-     */
-    private const val OVERLAY_HIDE_TIMEOUT_MS = 600L
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val session = ProjectionSession()
@@ -389,22 +381,25 @@ object CaptureController {
     /**
      * 1枚保存する。
      *
-     * **押した時点のフレームを先に確保してから隠す、では焼き付きは消えない。** バッファの
-     * 最新フレームは自分が合成された後の絵なので、確保した1枚にボタンが写っている。
-     * 順序を逆にして、隠す → 隠した後のフレームを待つ → **画素でボタンが消えたことを確かめる**
-     * → 写し取る → 戻す、とする。
+     * **`FLAG_SECURE` は焼き付きを消さない。** 実機ではボタン窓の矩形が投影フレームで
+     * 完全な黒 (0, 0, 0) になる。この黒を「ボタンがまだ写っている」印に使う。
+     * 順序は、押下時の矩形を控える → 隠す → 候補を撮る → **矩形が非黒なのを確かめる**
+     * → 写し取る → 戻す。黒い候補は捨て、次のフレームでやり直す。
      *
      * **時刻では焼き付きを証明できない。** `Image.getTimestamp()` は合成時刻ではなく、
      * 最後の sink へ `queueBuffer()` した時刻なので、隠す前に合成された絵が隠した後に
      * キューされれば「隠した後」の時刻を持つ。時刻は候補を絞る一次フィルタにだけ使い、
-     * **保存してよいかの最終判断は画素**（[OverlayPixelCheck]）で行う。
+     * **保存してよいかの最終判断は候補の黒い印**（[OverlayPixelCheck]）で行う。
      *
-     * 1. 押した瞬間の最新フレーム（ボタンが写っている）から、ボタンの矩形の画素を控える
+     * 1. 押した瞬間の最新フレームから、ボタンの矩形の画素を控える
      * 2. 隠す（現行の手順のまま）
-     * 3. 候補フレームの同じ矩形の画素を控えたものと比べる
-     * 4. 差が大きい＝ボタンが消えて下の絵が出ている → 保存
-     * 5. 差が小さい＝ボタンが残っている → 捨てて次のフレームでやり直す（[VerifiedFrameGate]）
-     * 6. [OVERLAY_HIDE_TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
+     * 3. 候補フレームの同じ矩形を読む
+     * 4. 平均輝度が 3 以上＝非黒なら保存。3 未満＝まだ黒い印が写っているので捨てる
+     * 5. 捨てたら次のフレームでやり直す（[VerifiedFrameGate]）
+     * 6. [CaptureDeadline.TIMEOUT_MS] を超えたら保存せず [CapturePlan.STALLED_MESSAGE]
+     *
+     * 下の画面そのものが真っ黒なら、ボタンを隠した後も黒いままになる。この場合も保存せず、
+     * 時間切れの文言でボタンを動かすよう人に知らせる。下の絵の変化との差は判定に使わない。
      *
      * 隠すボタンが無い（オーバーレイ未許可）ときは隠すものが無いので、待たずに最新1枚を
      * そのまま保存する。静止した画面では新しいフレームが来ないので、待つと必ず失敗する。
@@ -443,8 +438,8 @@ object CaptureController {
             try {
                 // 1. 押した瞬間の最新フレームから、ボタンの矩形の画素を控える。
                 //    まだ隠していないので、この1枚にはボタンが写っている。
-                val baseline = if (rect != null) grabRect(frames, rect) else null
-                if (rect != null && baseline == null) {
+                val pressedRect = if (rect != null) grabRect(frames, rect) else null
+                if (rect != null && pressedRect == null) {
                     val text = "取得ボタンの画素を読めないため保存しませんでした"
                     setMessage(text)
                     if (notifyWithToast) toast(text)
@@ -463,15 +458,15 @@ object CaptureController {
                 val hideCompletedAtNanos = if (button != null) System.nanoTime() else null
                 val hiddenAt = SystemClock.elapsedRealtime()
                 val plan = CapturePlan.forPress(hideCompletedAtNanos)
-                val check = if (rect != null && baseline != null) OverlayPixelCheck(rect, baseline) else null
+                val check = if (rect != null && pressedRect != null) OverlayPixelCheck(rect, pressedRect) else null
                 val gate = VerifiedFrameGate(plan, check)
-                val deadlineAt = hiddenAt + OVERLAY_HIDE_TIMEOUT_MS
+                val deadline = CaptureDeadline(hiddenAt)
 
                 // 3〜6. 候補を撮り、画素で確かめ、駄目なら次のフレームでやり直す。
                 var snapshot: Bitmap? = null
                 var discarded = 0
                 while (snapshot == null) {
-                    val remaining = deadlineAt - SystemClock.elapsedRealtime()
+                    val remaining = deadline.remainingMillis(SystemClock.elapsedRealtime())
                     if (remaining <= 0) break
                     // 条件を満たす候補がすでにあれば first はその場で返る。
                     val woke = withTimeoutOrNull(remaining) { frames.stamp.first { gate.wants(it) } }
@@ -638,14 +633,15 @@ object CaptureController {
         }
     }
 
-    /** 画素で確かめた1枚。[Burned] は「ボタンがまだ写っている」＝保存しない候補。 */
+    /** 画素で確かめた1枚。[Burned] は黒い印が残っている＝保存しない候補。 */
     private sealed interface Shot {
         class Taken(val bitmap: Bitmap, val stampNanos: Long) : Shot
         class Burned(val stampNanos: Long) : Shot
     }
 
     /**
-     * ボタンの矩形の画素を、押した瞬間のフレームから控える（ボタンが写っている側）。
+     * ボタンの矩形の画素を、押した瞬間の最新フレームから控える。
+     * 矩形の位置と画素数を確かめるためのもので、候補との差分比較には使わない。
      * 矩形が画像に収まらない・フレームが無いときは null。
      */
     private suspend fun grabRect(frames: FrameStore.Session<Image>, rect: PixelRect): IntArray? =
@@ -654,10 +650,10 @@ object CaptureController {
         }
 
     /**
-     * 候補フレームを1枚取り、**保存してよいかを画素で確かめる**。バッファは消費しない。
+     * 候補フレームを1枚取り、**保存してよいかを黒い印で確かめる**。バッファは消費しない。
      *
-     * 矩形の画素を読み、控えた画素と比べてボタンが消えていれば [Shot.Taken]（全体を Bitmap に
-     * 写す）。残っていれば [Shot.Burned]。Bitmap への写しは判断が通った1枚だけでよい。
+     * 矩形の平均輝度が 3 以上なら [Shot.Taken]（全体を Bitmap に写す）。3 未満なら
+     * [Shot.Burned]。Bitmap への写しは判断が通った1枚だけでよい。
      */
     private suspend fun takeShot(
         frames: FrameStore.Session<Image>,

@@ -17,10 +17,10 @@ class VerifiedFrameGateTest {
 
     private val rect = PixelRect(964, 819, 8, 8)
     private val background = 0xFF3A6EA5.toInt()
-    private val burned = IntArray(rect.pixelCount) { 0xFF101010.toInt() }
+    private val burned = IntArray(rect.pixelCount) { 0xFF000000.toInt() }
     private val clean = IntArray(rect.pixelCount) { background }
 
-    private fun check() = OverlayPixelCheck(rect, burned)
+    private fun check() = OverlayPixelCheck(rect, IntArray(rect.pixelCount) { background })
 
     /** Controller と同じ順序で「待つ → 画素で確かめる → 駄目なら次」を回す台。 */
     private class Loop(plan: CapturePlan, check: OverlayPixelCheck?) {
@@ -100,6 +100,20 @@ class VerifiedFrameGateTest {
         assertNull(loop.chosen)
         assertEquals(0, loop.discarded)
         assertFalse(loop.wants(999_000_000))
+    }
+
+    @Test
+    fun nonBlackCandidatesProduceCapture() {
+        val colors = listOf(0xFFFFFFFF.toInt(), background, 0xFF101010.toInt())
+        colors.forEach { color ->
+            val plan = CapturePlan.forPress(hideCompletedAtNanos = 1_000_000_000)
+            val loop = Loop(plan, check())
+
+            loop.deliver(1_050_000_000, IntArray(rect.pixelCount) { color })
+
+            assertEquals(Integer.toHexString(color), 1_050_000_000L, loop.chosen)
+            assertEquals(0, loop.discarded)
+        }
     }
 
     @Test

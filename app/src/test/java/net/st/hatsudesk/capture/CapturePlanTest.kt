@@ -107,7 +107,7 @@ class CapturePlanTest {
     @Test
     fun stalledMessage() {
         assertEquals(
-            "画面が止まっていて撮れませんでした。もう一度押してください",
+            "画面が止まっているか、ボタンの下が真っ黒です。ボタンを動かして再度お試しください",
             CapturePlan.STALLED_MESSAGE,
         )
     }

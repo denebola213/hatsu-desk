@@ -1,5 +1,18 @@
 package net.st.hatsudesk.capture
 
+/** 取得の待ち時間。実機時計の代わりに `SystemClock.elapsedRealtime()` の値を渡して判定する。 */
+internal class CaptureDeadline(startedAtMillis: Long) {
+    private val expiresAtMillis = startedAtMillis + TIMEOUT_MS
+
+    /** 残り時間。600ms に達したら 0 を返し、Controller は保存せずに中止する。 */
+    fun remainingMillis(nowMillis: Long): Long =
+        (expiresAtMillis - nowMillis).coerceAtLeast(0L)
+
+    companion object {
+        const val TIMEOUT_MS = 600L
+    }
+}
+
 /**
  * 1回の取得で、何を待ち、どのフレームを保存してよいかを決める。
  *
@@ -10,8 +23,8 @@ package net.st.hatsudesk.capture
  * **ただし時刻は一次フィルタにすぎない。** `Image.getTimestamp()` は合成時刻ではなく
  * 最後の sink への `queueBuffer()` の時刻なので、隠す前に合成された絵が隠した後に
  * キューされれば「隠した後」の時刻を持つ。この判定を通った候補でも、ボタンが写っている
- * ことがある。保存してよいかの最終判断は、ボタンの矩形の画素を比べる
- * `OverlayPixelCheck`（`VerifiedFrameGate` 経由）が行う。
+ * ことがある。保存してよいかの最終判断は `OverlayPixelCheck`（`VerifiedFrameGate` 経由）が、
+ * 候補の矩形に残る黒い印から行う。
  *
  * 時刻はミリ秒に丸めない。`System.nanoTime()` は `SystemClock.uptimeMillis()` と同じ
  * 単調時計（CLOCK_MONOTONIC）で、`Image.getTimestamp()` の基準でもある。ms に丸めると、
@@ -45,8 +58,8 @@ internal class CapturePlan private constructor(
     }
 
     companion object {
-        /** 隠した後にフレームが来ないとき、画面に出す一言。 */
-        const val STALLED_MESSAGE = "画面が止まっていて撮れませんでした。もう一度押してください"
+        /** 黒い印が消えないとき・画面が止まっているときに、人へ次の操作を示す一言。 */
+        const val STALLED_MESSAGE = "画面が止まっているか、ボタンの下が真っ黒です。ボタンを動かして再度お試しください"
 
         /**
          * 押した時点の段取りを決める。
